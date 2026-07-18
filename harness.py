@@ -79,6 +79,22 @@ def _repo_slug(repo_url):
 
 # ---- binary bootstrap ---------------------------------------------------
 
+def _ensure_cuda_driver_symlink():
+    """kaggle's image ships the nvidia driver as libcuda.so.1 only and trims
+    the toolkit's stubs/ dir, so cmake's FindCUDAToolkit can't create the
+    CUDA::cuda_driver target ggml-cuda links against ("target was not
+    found"). give cmake the linkable libcuda.so name it wants."""
+    lib = "/usr/lib/x86_64-linux-gnu/libcuda.so"
+    if os.path.exists(lib) or os.path.exists("/usr/local/cuda/lib64/stubs/libcuda.so"):
+        return
+    if os.path.exists(lib + ".1"):
+        try:
+            os.symlink(lib + ".1", lib)
+            print("symlinked libcuda.so.1 -> libcuda.so (cmake needs the linkable name)")
+        except OSError as e:
+            print(f"could not create {lib}: {e} -- cuda configure may fail")
+
+
 def ensure_llamacpp_binary(repo_url=None):
     """returns a working llama-server path for the given llama.cpp repo,
     building from source if nothing's cached. mainline and forks coexist in
@@ -107,10 +123,14 @@ def ensure_llamacpp_binary(repo_url=None):
         return built_bin
 
     print(f"no cached binary for {slug}, building from source (one-time cost this session)")
-    subprocess.run(
-        ["git", "clone", "--depth", "1", repo_url, build_dir],
-        check=True,
-    )
+    _ensure_cuda_driver_symlink()
+    # skip the clone if a previous (possibly failed) attempt left one behind --
+    # git refuses to clone into a non-empty dir, which used to wedge retries
+    if not os.path.exists(build_dir):
+        subprocess.run(
+            ["git", "clone", "--depth", "1", repo_url, build_dir],
+            check=True,
+        )
     subprocess.run(
         [
             "cmake", "-B", "build",
