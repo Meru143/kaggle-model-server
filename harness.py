@@ -131,6 +131,15 @@ def ensure_llamacpp_binary(repo_url=None):
             ["git", "clone", "--depth", "1", repo_url, build_dir],
             check=True,
         )
+    # a failed earlier configure poisons build/CMakeCache.txt (find_library
+    # NOTFOUND results are cached and re-trusted, e.g. the libcuda.so probe),
+    # so scrub the cache before re-configuring. compiled objects survive, so
+    # an interrupted compile still resumes instead of starting over.
+    shutil.rmtree(f"{build_dir}/build/CMakeFiles", ignore_errors=True)
+    try:
+        os.remove(f"{build_dir}/build/CMakeCache.txt")
+    except OSError:
+        pass
     subprocess.run(
         [
             "cmake", "-B", "build",
