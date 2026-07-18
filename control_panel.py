@@ -1,4 +1,6 @@
-"""point-and-click alternative to editing the notebook config cell (llm stack).
+"""browser studio for the llm stack: launch/stop models, switch quants, and
+chat with whatever's running -- one gradio app, unsloth-studio style
+"open a notebook, Run All, click the link".
 
     from control_panel import launch_panel
     launch_panel(auth=("user", "a-real-password"))
@@ -6,19 +8,24 @@
 needs: pip install gradio. the gradio share link is the panel's own public
 url -- independent of the model's cloudflared url, both coexist fine. share
 links are PUBLIC AND GUESSABLE: always pass auth=("user", "pass"), anyone
-with the link can otherwise start/stop your models.
+with the link can otherwise start/stop your models (run_studio.ipynb
+generates a random password and prints it).
 
-honest v1: no websockets, no auto-polling -- launches run in a background
-thread (a cold launch takes minutes: build + download + load) and a manual
-"refresh status" button shows progress via the server log tail.
+honest v1: launches run in a background thread (a cold launch takes
+minutes: build + download + load) with a manual "refresh status" button;
+the chat tab streams from the local openai endpoint.
 """
 
+import json
 import threading
+
+import requests
 
 from harness import SERVER_LOG, _tail, list_quants, run, stop
 from model_registry import MODELS
 
-_state = {"busy": False, "url": None, "error": None, "model": None}
+_PORT = 8080  # panel always launches on harness's default port
+_state = {"busy": False, "url": None, "error": None, "model": None, "api_key": None}
 
 
 def _on_model_change(model_key):
@@ -47,7 +54,8 @@ def _launch(model_key, gguf_file, ctx, n_cpu_moe, api_key):
         overrides["n_cpu_moe"] = int(n_cpu_moe)
 
     def work():
-        _state.update(busy=True, url=None, error=None, model=model_key)
+        _state.update(busy=True, url=None, error=None,
+                      model=model_key, api_key=api_key or None)
         try:
             _state["url"] = run(model_key, MODELS, api_key=api_key or None, **overrides)
         except Exception as e:
@@ -73,41 +81,81 @@ def _status():
         head = f"FAILED: {_state['error']}"
     elif _state["url"]:
         head = (f"{_state['model']} LIVE AT: {_state['url']}\n"
-                f"  chat web ui at that url, openai-compatible api at {_state['url']}/v1")
+                f"  chat here in the Chat tab, or at that url; api at {_state['url']}/v1")
     else:
         head = "nothing running"
     return f"{head}\n\n--- last 40 lines of {SERVER_LOG} ---\n{_tail(SERVER_LOG, 40)}"
 
 
-def launch_panel(auth=None):
-    """builds and serves the panel; returns the gradio app. auth=("user","pass")
-    is strongly recommended -- the share url is public."""
+def _chat(message, history):
+    """streams from the local llama-server openai endpoint (history is
+    gradio type="messages": [{role, content}, ...])"""
+    if _state["busy"]:
+        yield "model is still launching -- check refresh status in the Launch tab"
+        return
+    msgs = [{"role": m["role"], "content": m["content"]} for m in history]
+    msgs.append({"role": "user", "content": message})
+    headers = ({"Authorization": f"Bearer {_state['api_key']}"}
+               if _state["api_key"] else {})
+    try:
+        r = requests.post(
+            f"http://127.0.0.1:{_PORT}/v1/chat/completions",
+            json={"model": _state["model"] or "local", "messages": msgs, "stream": True},
+            headers=headers, stream=True, timeout=600)
+        r.raise_for_status()
+        acc = ""
+        for line in r.iter_lines():
+            if not line or not line.startswith(b"data: "):
+                continue
+            data = line[6:].decode("utf-8")
+            if data == "[DONE]":
+                break
+            choices = json.loads(data).get("choices") or [{}]
+            acc += choices[0].get("delta", {}).get("content") or ""
+            if acc:
+                yield acc
+    except requests.exceptions.RequestException as e:
+        yield (f"no model answering on port {_PORT} ({type(e).__name__}) -- "
+               "launch one in the Launch tab first")
+
+
+def _build():
     import gradio as gr
 
     with gr.Blocks(title="kaggle model server") as demo:
-        gr.Markdown("## kaggle model server — control panel")
-        model = gr.Dropdown(choices=sorted(MODELS), label="model",
-                            value=sorted(MODELS)[0])
-        quant = gr.Dropdown(choices=[], value=None, allow_custom_value=True,
-                            label="gguf file (pick model first to populate; empty = registry default)")
-        with gr.Row():
-            ctx = gr.Number(label="ctx", value=MODELS[sorted(MODELS)[0]].get("ctx", 8192))
-            n_cpu_moe = gr.Number(label="n_cpu_moe (blank = default)", value=None)
-        api_key = gr.Textbox(label="api key (optional but wise -- tunnel urls are public)")
-        status = gr.Textbox(label="status", lines=14)
-        with gr.Row():
-            launch_btn = gr.Button("Launch", variant="primary")
-            stop_btn = gr.Button("Stop")
-            refresh_btn = gr.Button("Refresh status")
+        gr.Markdown("## kaggle model server — studio")
+        with gr.Tab("Launch"):
+            model = gr.Dropdown(choices=sorted(MODELS), label="model",
+                                value=sorted(MODELS)[0])
+            quant = gr.Dropdown(choices=[], value=None, allow_custom_value=True,
+                                label="gguf file (pick model first to populate; empty = registry default)")
+            with gr.Row():
+                ctx = gr.Number(label="ctx", value=MODELS[sorted(MODELS)[0]].get("ctx", 8192))
+                n_cpu_moe = gr.Number(label="n_cpu_moe (blank = default)", value=None)
+            api_key = gr.Textbox(label="api key (optional but wise -- tunnel urls are public)")
+            status = gr.Textbox(label="status", lines=14)
+            with gr.Row():
+                launch_btn = gr.Button("Launch", variant="primary")
+                stop_btn = gr.Button("Stop")
+                refresh_btn = gr.Button("Refresh status")
 
-        model.change(_on_model_change, inputs=model, outputs=[quant, ctx, n_cpu_moe])
-        launch_btn.click(_launch, inputs=[model, quant, ctx, n_cpu_moe, api_key],
-                         outputs=status)
-        stop_btn.click(_stop, outputs=status)
-        refresh_btn.click(_status, outputs=status)
+            model.change(_on_model_change, inputs=model, outputs=[quant, ctx, n_cpu_moe])
+            launch_btn.click(_launch, inputs=[model, quant, ctx, n_cpu_moe, api_key],
+                             outputs=status)
+            stop_btn.click(_stop, outputs=status)
+            refresh_btn.click(_status, outputs=status)
+        with gr.Tab("Chat"):
+            # gradio 6 dropped the type= kwarg -- messages format is the default
+            gr.ChatInterface(_chat)
+    return demo
 
+
+def launch_panel(auth=None):
+    """builds and serves the studio; returns the gradio app. auth=("user","pass")
+    is strongly recommended -- the share url is public."""
     if auth is None:
         print("WARNING: no auth -- anyone with the share link controls your gpus. "
               'pass auth=("user", "pass").')
+    demo = _build()
     demo.launch(share=True, auth=auth, server_port=7860)
     return demo
