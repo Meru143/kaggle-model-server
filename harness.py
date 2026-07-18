@@ -79,22 +79,6 @@ def _repo_slug(repo_url):
 
 # ---- binary bootstrap ---------------------------------------------------
 
-def _ensure_cuda_driver_symlink():
-    """kaggle's image ships the nvidia driver as libcuda.so.1 only and trims
-    the toolkit's stubs/ dir, so cmake's FindCUDAToolkit can't create the
-    CUDA::cuda_driver target ggml-cuda links against ("target was not
-    found"). give cmake the linkable libcuda.so name it wants."""
-    lib = "/usr/lib/x86_64-linux-gnu/libcuda.so"
-    if os.path.exists(lib) or os.path.exists("/usr/local/cuda/lib64/stubs/libcuda.so"):
-        return
-    if os.path.exists(lib + ".1"):
-        try:
-            os.symlink(lib + ".1", lib)
-            print("symlinked libcuda.so.1 -> libcuda.so (cmake needs the linkable name)")
-        except OSError as e:
-            print(f"could not create {lib}: {e} -- cuda configure may fail")
-
-
 def ensure_llamacpp_binary(repo_url=None):
     """returns a working llama-server path for the given llama.cpp repo,
     building from source if nothing's cached. mainline and forks coexist in
@@ -123,7 +107,6 @@ def ensure_llamacpp_binary(repo_url=None):
         return built_bin
 
     print(f"no cached binary for {slug}, building from source (one-time cost this session)")
-    _ensure_cuda_driver_symlink()
     # skip the clone if a previous (possibly failed) attempt left one behind --
     # git refuses to clone into a non-empty dir, which used to wedge retries
     if not os.path.exists(build_dir):
@@ -152,6 +135,13 @@ def ensure_llamacpp_binary(repo_url=None):
             # out if the dev headers are missing; we fetch weights ourselves,
             # so switch it off rather than apt-get extra packages
             "-DLLAMA_CURL=OFF",
+            # kaggle's image has no linkable libcuda.so anywhere cmake looks
+            # (driver ships as libcuda.so.1 only, toolkit stubs are trimmed),
+            # so the CUDA::cuda_driver target never exists and configure dies.
+            # NO_VMM drops that link entirely (ggml's cmake: "no need to link
+            # directly with the cuda driver lib") at the cost of the VMM pool
+            # allocator -- negligible for single-model serving on t4s.
+            "-DGGML_CUDA_NO_VMM=ON",
             # static build -> llama-server is one self-contained file, so
             # saving just that file to a Kaggle Dataset actually works (the
             # default shared build would also need the libggml/libllama .so's)
