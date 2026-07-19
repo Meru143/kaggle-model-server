@@ -16,6 +16,7 @@ minutes: build + download + load) with a manual "refresh status" button;
 the chat tab streams from the local openai endpoint.
 """
 
+import inspect
 import json
 import threading
 
@@ -172,8 +173,15 @@ def _build():
             stop_btn.click(_stop, outputs=status)
             refresh_btn.click(_status, outputs=status)
         with gr.Tab("Chat"):
-            # gradio 6 dropped the type= kwarg -- messages format is the default
-            gr.ChatInterface(_chat)
+            # kaggle preinstalls an older gradio whose history defaults to the
+            # deprecated tuples format; gradio 6 removed the kwarg entirely.
+            # ask for openai-style messages wherever the knob still exists
+            # (_normalize_history copes with either format regardless).
+            chat_kwargs = (
+                {"type": "messages"}
+                if "type" in inspect.signature(gr.ChatInterface.__init__).parameters
+                else {})
+            gr.ChatInterface(_chat, **chat_kwargs)
     return demo
 
 
