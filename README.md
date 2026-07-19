@@ -5,7 +5,7 @@ Serve real AI models from Kaggle's free tier (2× Tesla T4) and reach them from 
 ## Kaggle quickstart
 
 1. New notebook → Accelerator **GPU T4 ×2** → Settings → **Internet ON**.
-2. File → Import notebook → pick `run_model.ipynb` (or `run_image` / `run_video`) from this repo.
+2. File → Import notebook → pick `run_studio.ipynb` (the UI) or `run_model.ipynb` (code cells) from this repo.
 3. **Run All**. First boot builds/downloads for ~15–20 min (see cache recipe below to cut that to ~2).
 4. Copy the printed `https://…trycloudflare.com` URL — that's your server, from any device.
 5. When done: run `stop()` (or `comfy.stop()`), then end the session so you don't burn GPU quota.
@@ -14,10 +14,10 @@ Serve real AI models from Kaggle's free tier (2× Tesla T4) and reach them from 
 
 | Notebook | Stack | Open it when you want |
 |---|---|---|
-| `run_model.ipynb` | llama.cpp LLMs | an OpenAI-compatible chat/completions API + built-in chat UI |
-| `run_studio.ipynb` | all three | the point-and-click studio: Launch/Chat/Image/Video tabs from one link |
-| `run_image.ipynb` | diffusers txt2img | PNGs from prompts in notebook cells (z-image / krea / flux / ideogram) |
-| `run_video.ipynb` | headless ComfyUI | video generation (ltx-2.3, scail-2, lingbot) with the full node GUI |
+| `run_studio.ipynb` | all three | the point-and-click studio: launch/chat/image/video tabs from one link |
+| `run_model.ipynb` | llama.cpp LLMs | the gradio-free code path: an OpenAI-compatible API + built-in chat UI |
+
+Image and video from code (no studio): `from image_models import install, load, generate` and `import comfy_bootstrap as comfy; comfy.install(); comfy.fetch_stack("ltx-2.3"); comfy.start()` in any notebook that clones this repo — the module docstrings carry the full recipes.
 
 ## Changing settings (no registry edits needed)
 

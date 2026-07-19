@@ -3,7 +3,7 @@ harness.py's lifecycle style: install once per session, fetch a named model
 stack, start the server with logs going to a file, expose it through the
 same cloudflared tunnel helper, drive it over the http api.
 
-usage (see run_video.ipynb):
+usage (from any notebook that clones the repo, or the studio's video tab):
     import comfy_bootstrap as comfy
     comfy.install()
     comfy.fetch_stack("ltx-2.3")

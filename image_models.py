@@ -6,7 +6,7 @@ in the 0.39 stable release -- and git-main imports symbols from UNRELEASED
 huggingface_hub (CachedRepoTreeNotFoundError broke image loads on kaggle),
 so stable is pinned deliberately. environment beats card.
 
-usage from a notebook (see run_image.ipynb):
+usage (from any notebook that clones the repo, or the studio's image tab):
     from image_models import IMAGE_MODELS, install, load, generate
     install("z-image-turbo")
     pipe = load("z-image-turbo")
