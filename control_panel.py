@@ -624,7 +624,9 @@ def launch_panel(auth=None):
         print("WARNING: no auth -- anyone with the share link controls your gpus. "
               'pass auth=("user", "pass").')
     demo = _build()
-    kwargs = dict(share=True, auth=auth, server_port=7860)
+    # show_error surfaces the real message in the browser when an event
+    # fails client-side (instead of gradio's bare "Error" pill)
+    kwargs = dict(share=True, auth=auth, server_port=7860, show_error=True)
     if _launch_takes_style(gr):
         kwargs.update(_style(gr))
     demo.launch(**kwargs)
