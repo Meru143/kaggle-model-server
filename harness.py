@@ -214,6 +214,10 @@ def ensure_weights(model_cfg):
 
 # ---- quant switching + budget check --------------------------------------
 
+# gguf sidecar files that are never the model itself
+_AUX_GGUF = ("mmproj", "vae", "encoder")
+
+
 def resolve_quant(repo, quant):
     """map a quant name ('Q3_K_M', 'MTP-Q4_K_M', 'UD-Q4_K_XL', ...) to the
     actual gguf filename in the repo, so nobody has to memorize filenames.
@@ -222,8 +226,7 @@ def resolve_quant(repo, quant):
     ggufs = [f for f in list_repo_files(repo) if f.lower().endswith(".gguf")]
     cands = [f for f in ggufs
              if q in os.path.basename(f).lower()
-             and not any(t in os.path.basename(f).lower()
-                         for t in ("mmproj", "vae", "encoder"))]
+             and not any(t in os.path.basename(f).lower() for t in _AUX_GGUF)]
     if not cands:
         avail = sorted({m.group(0) for f in ggufs for m in re.finditer(
             r"(?:UD-)?(?:I?Q\d[A-Za-z0-9_]*|BF16|F16|F32)", os.path.basename(f))})
@@ -245,6 +248,47 @@ def list_quants(model_key, registry):
     for name, gb in rows:
         print(f"{gb:8.2f} GB  {name}")
     return rows
+
+
+def detect_entry(repo, quant=None):
+    """build a registry-style entry for an arbitrary gguf repo, auto-detecting
+    the file and gpu placement from real file sizes: prefers ~Q4_K_M among
+    files fitting the dual-t4 budget (<=26GB), then decides single vs dual t4
+    at the 12GB line. lets you serve unlisted models without editing the
+    registry:
+        MODELS["my-model"] = detect_entry("bartowski/SomeModel-GGUF")
+        run("my-model", MODELS)
+    defaults are guesses -- check the model card for sampling params, MTP
+    flags, and ctx quirks, then promote a proven entry into model_registry.py."""
+    info = HfApi().model_info(repo, files_metadata=True)
+    ggufs = [(s.rfilename, round((s.size or 0) / 1e9, 2)) for s in info.siblings
+             if s.rfilename.lower().endswith(".gguf")
+             and not any(t in s.rfilename.lower() for t in _AUX_GGUF)
+             and "-of-" not in s.rfilename.lower()]  # sharded ggufs need every part
+    if not ggufs:
+        raise ValueError(f"no single-file gguf in {repo} -- is it a gguf repo?")
+    if quant:
+        name = resolve_quant(repo, quant)
+        size = dict(ggufs).get(name, 0)
+    else:
+        fitting = [g for g in ggufs if g[1] <= 26] or [min(ggufs, key=lambda g: g[1])]
+        name, size = (next((g for g in fitting if "q4_k_m" in g[0].lower()), None)
+                      or next((g for g in fitting if "q4" in g[0].lower()), None)
+                      or max(fitting, key=lambda g: g[1]))
+    single = size <= 12
+    return {
+        "hf_repo": repo,
+        "hf_file": name,
+        "ctx": 8192,
+        "ngl": 99,
+        "tensor_split": None if single else "1,1",
+        "n_cpu_moe": None,
+        "gpu_devices": [0] if single else [0, 1],
+        # --jinja applies the chat template shipped in the gguf -- the right
+        # default for modern instruct models
+        "extra_args": ["--jinja"],
+        "est_vram_gb": round(size + 2, 1),  # file + rough kv/buffers at 8k ctx
+    }
 
 
 def _warn_if_over_budget(cfg):

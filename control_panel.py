@@ -22,9 +22,11 @@ import threading
 
 import requests
 
+import re
+
 import comfy_bootstrap as comfy
 import image_models
-from harness import SERVER_LOG, _tail, list_quants, run, stop
+from harness import SERVER_LOG, _tail, detect_entry, list_quants, run, stop
 from image_models import IMAGE_MODELS
 from model_registry import MODELS
 
@@ -152,6 +154,32 @@ def _chat(message, history):
                "launch one in the Launch tab first")
 
 
+def _import_model(repo):
+    """add any hf gguf repo to the session's registry with auto-detected
+    settings, and point the launch controls at it"""
+    import gradio as gr
+    repo = (repo or "").strip().strip("/")
+    if repo.count("/") != 1:
+        return (gr.update(), gr.update(), gr.update(), gr.update(),
+                'expected "author/repo-name" (e.g. bartowski/SomeModel-GGUF)')
+    try:
+        entry = detect_entry(repo)
+    except Exception as e:
+        return (gr.update(), gr.update(), gr.update(), gr.update(),
+                f"import failed: {type(e).__name__}: {e}")
+    key = re.sub(r"[^a-z0-9.]+", "-", repo.split("/")[-1].lower()).strip("-")
+    key = re.sub(r"-gguf$", "", key)
+    MODELS[key] = entry
+    quant_update, ctx_update, moe_update = _on_model_change(key)
+    gpus = "both t4s" if entry["tensor_split"] else "one t4"
+    msg = (f"added {key!r}: {entry['hf_file']} ({entry['est_vram_gb'] - 2:.1f}GB -> {gpus})\n"
+           f"defaults are auto-detected guesses -- check the model card for sampling/MTP flags.\n"
+           f"to keep it permanently, paste into model_registry.py:\n"
+           f'    "{key}": {json.dumps(entry)},')
+    return (gr.update(choices=sorted(MODELS), value=key),
+            quant_update, ctx_update, moe_update, msg)
+
+
 def _img_setup(key):
     if _img_state["busy"]:
         return "already installing/loading -- click refresh"
@@ -228,12 +256,33 @@ def _vid_stop():
     return "stopped comfyui"
 
 
+_CSS = """
+.gradio-container {max-width: 1100px !important; margin: auto !important}
+#hdr h1 {margin-bottom: 0}
+#hdr p {margin-top: 2px; opacity: 0.65}
+"""
+
+
+def _style(gr):
+    theme = (gr.themes.Soft(primary_hue="indigo", neutral_hue="slate")
+             if hasattr(gr, "themes") else None)
+    return {"theme": theme, "css": _CSS}
+
+
+def _launch_takes_style(gr):
+    # gradio 6 moved theme/css from the Blocks constructor to launch()
+    return "theme" in inspect.signature(gr.Blocks.launch).parameters
+
+
 def _build():
     import gradio as gr
 
-    with gr.Blocks(title="kaggle model server") as demo:
-        gr.Markdown("## kaggle model server — studio")
-        with gr.Tab("Launch"):
+    style = {} if _launch_takes_style(gr) else _style(gr)
+    with gr.Blocks(title="kaggle model server", **style) as demo:
+        gr.Markdown("# ⚡ kaggle model server\n"
+                    "llms, images and video off a free t4×2 — launched from your browser",
+                    elem_id="hdr")
+        with gr.Tab("🚀 Launch"):
             model = gr.Dropdown(choices=sorted(MODELS), label="model",
                                 value=sorted(MODELS)[0])
             quant = gr.Dropdown(choices=[], value=None, allow_custom_value=True,
@@ -242,18 +291,27 @@ def _build():
                 ctx = gr.Number(label="ctx", value=MODELS[sorted(MODELS)[0]].get("ctx", 8192))
                 n_cpu_moe = gr.Number(label="n_cpu_moe (blank = default)", value=None)
             api_key = gr.Textbox(label="api key (optional but wise -- tunnel urls are public)")
-            status = gr.Textbox(label="status", lines=14)
             with gr.Row():
                 launch_btn = gr.Button("Launch", variant="primary")
                 stop_btn = gr.Button("Stop")
                 refresh_btn = gr.Button("Refresh status")
+            status = gr.Textbox(label="status", lines=14)
+            with gr.Accordion("➕ import a model from hugging face", open=False):
+                gr.Markdown("paste any gguf repo id — file choice and gpu split are "
+                            "auto-detected from the repo's file sizes.")
+                imp_repo = gr.Textbox(label="repo id",
+                                      placeholder="bartowski/SomeModel-GGUF")
+                imp_btn = gr.Button("Fetch & add", variant="primary")
+                imp_status = gr.Textbox(label="import result", lines=4)
 
             model.change(_on_model_change, inputs=model, outputs=[quant, ctx, n_cpu_moe])
             launch_btn.click(_launch, inputs=[model, quant, ctx, n_cpu_moe, api_key],
                              outputs=status)
             stop_btn.click(_stop, outputs=status)
             refresh_btn.click(_status, outputs=status)
-        with gr.Tab("Chat"):
+            imp_btn.click(_import_model, inputs=imp_repo,
+                          outputs=[model, quant, ctx, n_cpu_moe, imp_status])
+        with gr.Tab("💬 Chat"):
             # kaggle preinstalls an older gradio whose history defaults to the
             # deprecated tuples format; gradio 6 removed the kwarg entirely.
             # ask for openai-style messages wherever the knob still exists
@@ -263,7 +321,7 @@ def _build():
                 if "type" in inspect.signature(gr.ChatInterface.__init__).parameters
                 else {})
             gr.ChatInterface(_chat, **chat_kwargs)
-        with gr.Tab("Image"):
+        with gr.Tab("🎨 Image"):
             gr.Markdown("loads on **gpu 1**, so it runs beside an llm on gpu 0. "
                         "flux1-dev / ideogram-4 need an HF_TOKEN secret + accepted license.")
             img_model = gr.Dropdown(choices=sorted(IMAGE_MODELS), value="z-image-turbo",
@@ -281,7 +339,7 @@ def _build():
             img_refresh_btn.click(_img_status, outputs=img_status)
             img_go.click(_img_generate, inputs=[img_prompt, img_steps],
                          outputs=[img_status, img_out])
-        with gr.Tab("Video"):
+        with gr.Tab("🎬 Video"):
             gr.Markdown("boots headless comfyui + tunnels its **full node gui** -- "
                         "open the printed url to build workflows. wants most of the "
                         "box's vram: stop the llm first if things oom. relaunching an "
@@ -303,9 +361,13 @@ def _build():
 def launch_panel(auth=None):
     """builds and serves the studio; returns the gradio app. auth=("user","pass")
     is strongly recommended -- the share url is public."""
+    import gradio as gr
     if auth is None:
         print("WARNING: no auth -- anyone with the share link controls your gpus. "
               'pass auth=("user", "pass").')
     demo = _build()
-    demo.launch(share=True, auth=auth, server_port=7860)
+    kwargs = dict(share=True, auth=auth, server_port=7860)
+    if _launch_takes_style(gr):
+        kwargs.update(_style(gr))
+    demo.launch(**kwargs)
     return demo
