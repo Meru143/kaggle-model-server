@@ -75,7 +75,9 @@ Every process logs to a file — read the tail, the answer is usually right ther
 | Model | Caveat |
 |---|---|
 | FLUX.1-dev | **Non-commercial** license; gated — accept on the model page, needs `HF_TOKEN` |
-| Ideogram 4 | **Non-commercial** + **gated** — accept license on the model page, needs `HF_TOKEN` (Kaggle secret) |
+| Ideogram 4 (incl. fal instant/fast) | **Non-commercial** + **gated** — accept license on the model page, needs `HF_TOKEN` (Kaggle secret) |
+| stable-fast-3d / stable-point-aware-3d | Stability **community license** + gated — accept on the model pages |
+| ltx-10eros / sulphur-2 stacks | Community finetunes aimed at explicit content — NSFW output violates Kaggle ToS |
 | Bonsai 27B (ternary + 1-bit) | Needs the PrismML llama.cpp fork (auto-built); published perf is H100 — **unverified on T4 kernels**, treat first boot as a smoke test |
 | Abliterated / uncensored entries (`-abl`) | Reduced refusals — review outputs; you are responsible for what you generate |
 | Everything | **NSFW generation violates Kaggle ToS** — don't; it risks your account |

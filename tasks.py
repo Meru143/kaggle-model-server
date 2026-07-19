@@ -18,6 +18,7 @@ no bf16), no flash-attention (needs ampere+) -> sdpa/eager.
 import os
 import shutil
 import subprocess
+import sys
 import time
 
 _OCR_PROMPT = (
@@ -128,21 +129,73 @@ def transcribe(audio_path, gpu: int = 1, port=8009):
         log.close()
 
 
-def embed(texts, gpu: int = 1):
-    """texts -> numpy embeddings via nvidia/Nemotron-3-Embed-1B-BF16 (loaded fp16)"""
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+def embed(texts, gpu: int = 1, model="nvidia/Nemotron-3-Embed-1B-BF16", dual=False):
+    """texts -> numpy embeddings (loaded fp16). the 8B sibling needs both
+    gpus: embed(texts, model="nvidia/Nemotron-3-Embed-8B-BF16", dual=True)
+    -- 16GB of weights won't fit one t4, dual shards it via device_map."""
+    if not dual:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     try:
         import torch
         from sentence_transformers import SentenceTransformer
     except ImportError as e:
         raise ImportError("needs: pip install sentence-transformers") from e
-    model = SentenceTransformer(
-        "nvidia/Nemotron-3-Embed-1B-BF16", device="cuda",
-        model_kwargs={"dtype": torch.float16,  # card says bf16; t4 -> fp16
-                      # card says flash_attention_2; that needs ampere+
-                      "attn_implementation": "eager"})
-    model.max_seq_length = 32768
-    return model.encode(texts)
+    kwargs = {"dtype": torch.float16,  # card says bf16; t4 -> fp16
+              # card says flash_attention_2; that needs ampere+
+              "attn_implementation": "eager"}
+    if dual:
+        kwargs["device_map"] = "auto"  # shard across both t4s
+        st = SentenceTransformer(model, model_kwargs=kwargs)
+    else:
+        st = SentenceTransformer(model, device="cuda", model_kwargs=kwargs)
+    st.max_seq_length = 32768
+    return st.encode(texts)
+
+
+def sound_effect(text, out_path, seconds=5, gpu: int = 1):
+    """text -> wav sound effect via OpenMOSS-Team/MOSS-SoundEffect-v2.0
+    (1.3B DiT + flow matching; up to 30s at 48kHz). card recommends 100
+    steps, cfg 4.0."""
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    try:
+        import torch
+        from moss_soundeffect_v2 import MossSoundEffectPipeline
+    except ImportError as e:
+        # card installs -e .[torch-cu128]; kaggle already has torch, so
+        # install the package without their torch extra
+        raise ImportError(
+            'needs: pip install "git+https://github.com/OpenMOSS/MOSS-TTS.git'
+            '#subdirectory=moss_soundeffect_v2"') from e
+    pipe = MossSoundEffectPipeline.from_pretrained(
+        "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+        torch_dtype=torch.float16,  # card says bf16; t4 is sm75 -> fp16
+        device="cuda")
+    audio = pipe(prompt=text, seconds=seconds, num_inference_steps=100, cfg_scale=4.0)
+    pipe.save_audio(audio, out_path)
+    return out_path
+
+
+def image_to_3d(image_path, out_dir="/kaggle/tmp/outputs/3d", model="sf3d", gpu: int = 1):
+    """image -> textured 3d mesh (glb) via stability's sf3d (fast, ~6GB) or
+    spar3d (point-aware, ~10.5GB). both are GATED: accept the license on the
+    hf model page + set the HF_TOKEN secret. runs the repo's own run.py."""
+    repo = {"sf3d": "https://github.com/Stability-AI/stable-fast-3d",
+            "spar3d": "https://github.com/Stability-AI/stable-point-aware-3d"}[model]
+    workdir = f"/kaggle/tmp/{repo.rsplit('/', 1)[1]}"
+    if not os.path.exists(workdir):
+        subprocess.run(["git", "clone", "--depth", "1", repo, workdir], check=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r",
+                        f"{workdir}/requirements.txt"], check=True)
+    os.makedirs(out_dir, exist_ok=True)
+    log_path = f"/kaggle/tmp/{model}.log"
+    with open(log_path, "w") as log:  # log to file, never PIPE
+        subprocess.run(
+            [sys.executable, "run.py", os.path.abspath(image_path),
+             "--output-dir", os.path.abspath(out_dir)],
+            cwd=workdir, check=True, stdout=log, stderr=subprocess.STDOUT,
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu)})
+    print(f"3d output in {out_dir} (log: {log_path})")
+    return out_dir
 
 
 def tts(text, out_path, speaker="Ryan", language="Auto", instruct=None, gpu: int = 1):

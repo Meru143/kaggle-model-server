@@ -71,6 +71,39 @@ IMAGE_MODELS = {
         "gated": True,
         "defaults": {},  # card passes no steps/guidance -- pipeline defaults
     },
+    # krea 2 without the turbo distillation: better quality, 52 steps,
+    # guidance 3.5 (card). same pipeline + nf4 treatment as the turbo.
+    "krea-2-raw": {
+        "hf_repo": "krea/Krea-2-Raw",
+        "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
+        "quantize": ["transformer"],
+        "defaults": {"num_inference_steps": 52, "guidance_scale": 3.5},
+    },
+    # fal's 8-step distill of ideogram 4 (GATED, non-commercial lineage):
+    # a transformer-only repo dropped into the ideogram base pipeline. no
+    # runtime cfg -- guidance 1.0 skips the uncond branch entirely, and the
+    # zero_uncond shim (from fal's card) satisfies diffusers 0.39's
+    # mandatory cfg slot without loading the base's 5GB uncond transformer.
+    "ideogram-4-instant": {
+        "hf_repo": "ideogram-ai/ideogram-4-nf4-diffusers",
+        "transformer_from": "fal/ideogram-v4-instant",  # bf16 -> nf4 on load
+        "zero_uncond": True,
+        "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
+        "quantize": None,
+        "gated": True,
+        "defaults": {"num_inference_steps": 8, "guidance_scale": 1.0},
+    },
+    # fal's 20-step sibling of -instant: same recipe, more steps, better
+    # detail (card). GATED like the rest of the ideogram family.
+    "ideogram-4-fast": {
+        "hf_repo": "ideogram-ai/ideogram-4-nf4-diffusers",
+        "transformer_from": "fal/ideogram-v4-fast",
+        "zero_uncond": True,
+        "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
+        "quantize": None,
+        "gated": True,
+        "defaults": {"num_inference_steps": 20, "guidance_scale": 1.0},
+    },
 }
 
 
@@ -136,7 +169,37 @@ def load(key, gpu=None):
                           "bnb_4bit_compute_dtype": torch.float16},
             components_to_quantize=cfg["quantize"],
         )
-    dual = gpu is None and torch.cuda.device_count() >= 2
+    if cfg.get("transformer_from"):
+        # transformer-swap repos (fal ideogram distills): pull just the
+        # denoiser from the variant repo, nf4 it on load, drop it into the
+        # base pipeline -- the base's own transformer is never downloaded
+        from diffusers import AutoModel, BitsAndBytesConfig
+        kwargs["transformer"] = AutoModel.from_pretrained(
+            cfg["transformer_from"], subfolder="transformer",
+            torch_dtype=torch.float16,
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16),
+            token=os.environ.get("HF_TOKEN"))
+    if cfg.get("zero_uncond"):
+        # fal card's zero-parameter stand-in for diffusers' mandatory cfg
+        # branch; with guidance_scale=1.0 it is never actually called
+        class _ZeroUncond(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("_dtype_anchor",
+                                     torch.empty(0, dtype=torch.float16),
+                                     persistent=False)
+
+            @property
+            def dtype(self):
+                return self._dtype_anchor.dtype
+
+        kwargs["unconditional_transformer"] = _ZeroUncond()
+    # transformer-swap entries stay on the single-gpu offload path: their
+    # nf4 denoiser (~5GB resident) + fp16 encoder (transient) fit one t4,
+    # and pipeline-level device_map with pre-passed components is untested
+    dual = (gpu is None and torch.cuda.device_count() >= 2
+            and not cfg.get("transformer_from"))
     if dual:
         kwargs["device_map"] = "balanced"
     print(f"loading {cfg['hf_repo']} "

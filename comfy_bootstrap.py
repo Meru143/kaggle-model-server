@@ -77,6 +77,60 @@ STACKS = {
         ("realrebelai/LingBot_ComfyUI", "LingBot_text-encoder.safetensors", "text_encoders"),
         ("realrebelai/LingBot_ComfyUI", "LingBot_vae.safetensors", "vae"),
     ],
+    # lingbot dense 1.3b, same rebels node pack -- the fast small sibling.
+    # (the ALX fp8 variant is skipped on purpose: its W8A8 fp8 matmul needs
+    # sm89+, t4 is sm75. this bf16 repack runs everywhere.)
+    "lingbot-1.3b": [
+        ("realrebelai/LingBot_ComfyUI", "LingBot_1.3b_DiT.safetensors", "unet"),
+        ("realrebelai/LingBot_ComfyUI", "LingBot_text-encoder.safetensors", "text_encoders"),
+        ("realrebelai/LingBot_ComfyUI", "LingBot_vae.safetensors", "vae"),
+    ],
+    # sulphur-2: ltx-2.3 finetune (video). unet from the abiray gguf mirror,
+    # standard ltx companions, plus sulphur's own distill lora; its t2v/i2v
+    # workflow jsons land in the gui browser automatically.
+    "sulphur-2": [
+        ("Abiray/Sulphur-2-base-GGUF", "sulphur_dev-Q3_K_M.gguf", "unet"),
+        ("unsloth/LTX-2.3-GGUF", "vae/ltx-2.3-22b-dev_video_vae.safetensors", "vae"),
+        ("unsloth/LTX-2.3-GGUF", "vae/ltx-2.3-22b-dev_audio_vae.safetensors", "vae"),
+        ("unsloth/LTX-2.3-GGUF", "text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors", "text_encoders"),
+        ("unsloth/gemma-3-12b-it-qat-GGUF", "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf", "text_encoders"),
+        ("unsloth/gemma-3-12b-it-qat-GGUF", "mmproj-BF16.gguf", "text_encoders"),
+        ("SulphurAI/Sulphur-2-base", "distill_loras/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors", "loras"),
+        ("Lightricks/LTX-2.3", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "latent_upscale_models"),
+    ],
+    # 10eros 1.4: explicit-content ltx-2.3 finetune (nsfw output violates
+    # kaggle tos -- your account, your risk). same companions as ltx-2.3.
+    "ltx-10eros": [
+        ("vantagewithai/LTX2.3-10Eros-1.4-GGUF", "10Eros_v1.4-Q3_K_M.gguf", "unet"),
+        ("unsloth/LTX-2.3-GGUF", "vae/ltx-2.3-22b-dev_video_vae.safetensors", "vae"),
+        ("unsloth/LTX-2.3-GGUF", "vae/ltx-2.3-22b-dev_audio_vae.safetensors", "vae"),
+        ("unsloth/LTX-2.3-GGUF", "text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors", "text_encoders"),
+        ("unsloth/gemma-3-12b-it-qat-GGUF", "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf", "text_encoders"),
+        ("unsloth/gemma-3-12b-it-qat-GGUF", "mmproj-BF16.gguf", "text_encoders"),
+        ("Lightricks/LTX-2.3", "ltx-2.3-22b-distilled-lora-384.safetensors", "loras"),
+        ("Lightricks/LTX-2.3", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "latent_upscale_models"),
+    ],
+    # krea 2 turbo IMAGE gen in comfy (image ggufs run here, not llama.cpp).
+    # companions per the vantage workflow: qwen3-vl encoder + qwen-image vae.
+    "krea2-turbo": [
+        ("vantagewithai/Krea-2-Turbo-GGUF", "krea2_turbo-Q4_K_M.gguf", "unet"),
+        ("Comfy-Org/Qwen3-VL", "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", "text_encoders"),
+        ("Comfy-Org/Qwen-Image_ComfyUI", "split_files/vae/qwen_image_vae.safetensors", "vae"),
+    ],
+    # krea 2 turbo HD finetune (image): ships its own hd-tuned vae; same
+    # qwen3-vl encoder. Q6_K (10.9GB) is the quality pick if vram allows.
+    "krea2-hd": [
+        ("wikeeyang/Krea2-Turbo-HD-V1", "Krea2-Turbo-HD-V1-Q4_K_S.gguf", "unet"),
+        ("wikeeyang/Krea2-Turbo-HD-V1", "Krea2-HD-vae.safetensors", "vae"),
+        ("Comfy-Org/Qwen3-VL", "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", "text_encoders"),
+    ],
+    # flux2-klein 9b finetune (image): comfy-org publishes the matching
+    # encoder (fp8 storage, fine on t4) + vae; example workflow ships in-repo.
+    "flux2-klein-v3": [
+        ("wikeeyang/Flux2-Klein-9B-True-V3", "Flux2-Klein-9B-True-V3-Q4_K.gguf", "unet"),
+        ("Comfy-Org/flux2-klein-9b", "split_files/text_encoders/qwen_3_8b_fp8mixed.safetensors", "text_encoders"),
+        ("Comfy-Org/flux2-klein-9b", "split_files/vae/flux2-vae.safetensors", "vae"),
+    ],
 }
 
 _LINGBOT_NODE_REPO = "https://github.com/RealRebelAI/ComfyUI_Rebels_LingBot"
@@ -174,6 +228,17 @@ def _place(repo, filename, subdir):
     return dst
 
 
+def _looks_like_workflow(f):
+    """'workflow' in the name, or a root-level json that isn't a config
+    (some packs ship the workflow as e.g. Vantage_Krea-2-Turbo.json)"""
+    n = f.lower()
+    if not n.endswith(".json"):
+        return False
+    if "workflow" in n:
+        return True
+    return "/" not in f and not any(x in n for x in ("config", "index", "tokenizer"))
+
+
 def _place_workflows(repos):
     """any workflow json shipped in a stack's repos lands in the gui's
     workflow browser, so the first video isn't 'build a graph from scratch'"""
@@ -181,7 +246,7 @@ def _place_workflows(repos):
     for repo in sorted(repos):
         try:
             for f in list_repo_files(repo):
-                if f.lower().endswith(".json") and "workflow" in f.lower():
+                if _looks_like_workflow(f):
                     local = hf_hub_download(repo_id=repo, filename=f, local_dir=WORK_DIR)
                     os.makedirs(wf_dir, exist_ok=True)
                     shutil.copy(local, os.path.join(wf_dir, os.path.basename(f)))
@@ -194,14 +259,16 @@ def fetch_stack(key, unet=None):
     """downloads a named model set and symlinks it into comfyui's model dirs.
     unet= overrides just the unet gguf filename (e.g. a different quant)."""
     files = STACKS[key]
-    if key == "lingbot-30b":
-        # the rebels loader node + the 30b transformer config it expects
+    if key.startswith("lingbot"):
+        # every lingbot variant loads through the rebels node pack
         node_dir = f"{COMFY_DIR}/custom_nodes/ComfyUI_Rebels_LingBot"
         _clone(_LINGBOT_NODE_REPO, node_dir)
         _pip_requirements(node_dir)
-        cfg = hf_hub_download("robbyant/lingbot-video-moe-30b-a3b", "transformer/config.json")
-        os.makedirs(f"{node_dir}/model_assets", exist_ok=True)
-        shutil.copy(cfg, f"{node_dir}/model_assets/transformer_config_30b.json")
+        if key == "lingbot-30b":
+            # plus the 30b transformer config the moe loader expects
+            cfg = hf_hub_download("robbyant/lingbot-video-moe-30b-a3b", "transformer/config.json")
+            os.makedirs(f"{node_dir}/model_assets", exist_ok=True)
+            shutil.copy(cfg, f"{node_dir}/model_assets/transformer_config_30b.json")
     for repo, filename, subdir in files:
         if unet and subdir == "unet":
             filename = unet
