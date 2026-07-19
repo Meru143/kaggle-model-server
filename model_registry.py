@@ -15,6 +15,10 @@ field notes:
   extra_args      optional. raw extra llama-server flags appended to the command.
   est_vram_gb     your own benchmarked number, not enforced by the harness -- just
                   here so the registry doubles as a reference when picking a model.
+  sampling        optional. the card's recommended request-time sampling params in
+                  openai style (llama-server also accepts top_k/repeat_penalty/min_p).
+                  the studio chat applies these automatically; api users copy them.
+                  qwen3.6-family entries carry the thinking-mode defaults.
 
 kaggle 2x t4 + 30GB ram budget cheat sheet:
   one t4      ~15GB usable -> gguf file <= ~12GB leaves room for 8k kv + buffers
@@ -77,6 +81,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0, 1],
         "extra_args": ["--jinja"],
+        "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20},
         "est_vram_gb": 20,
     },
 
@@ -109,6 +114,7 @@ MODELS = {
         "tensor_split": None,
         "n_cpu_moe": None,
         "gpu_devices": [0],
+        "sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "repeat_penalty": 1.05},
         "est_vram_gb": 7,
     },
     # qwythos v2: looping trained out, greedy decoding stays coherent (card).
@@ -121,6 +127,7 @@ MODELS = {
         "tensor_split": None,
         "n_cpu_moe": None,
         "gpu_devices": [0],
+        "sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "repeat_penalty": 1.05},
         "est_vram_gb": 9,
     },
     # coding/terminal-agentic gemma-4 finetune (~3.5x base on tau2 telecom).
@@ -135,6 +142,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0],
         "extra_args": ["--jinja"],
+        "sampling": {"temperature": 1.0, "repeat_penalty": 1.1},
         "est_vram_gb": 9,
     },
     # text-to-3D-mesh llm (llama-3.1-8b base): chat it a shape description,
@@ -161,6 +169,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0],
         "extra_args": ["--jinja"],
+        "sampling": {"temperature": 0.85, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.1},
         "est_vram_gb": 4,
     },
     # abliterated twin of qwythos-9b-1m (huihui). same 1M-ctx caveat: default
@@ -174,6 +183,7 @@ MODELS = {
         "tensor_split": None,
         "n_cpu_moe": None,
         "gpu_devices": [0],
+        "sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "repeat_penalty": 1.05},
         "est_vram_gb": 7.5,
     },
     # abliterated gemma-4-12b QAT (thinking + non-thinking both abliterated).
@@ -219,6 +229,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0, 1],
         "extra_args": ["--jinja", "--spec-type", "draft-mtp", "--spec-draft-n-max", "4"],
+        "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20},
         "est_vram_gb": 19,
     },
     # base qwen3.6-27b with the MTP head kept -- llama.cpp's MTP support
@@ -234,6 +245,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0, 1],
         "extra_args": ["--jinja", "-fa", "on", "--spec-type", "draft-mtp", "--spec-draft-n-max", "2"],
+        "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20},
         "est_vram_gb": 20,
     },
     # deepreinforce's swe/terminal coding distill (qwen3.6-35b-a3b base).
@@ -247,6 +259,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0, 1],
         "extra_args": ["--jinja"],
+        "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20},
         "est_vram_gb": 23,
     },
     # the OFFICIAL agents-a1 quant (qwen35moe arch, 21.2GB single file).
@@ -262,6 +275,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0, 1],
         "extra_args": ["--jinja"],
+        "sampling": {"temperature": 0.85, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.1},
         "est_vram_gb": 23,
     },
     # hauhaucs uncensored qwen3.6-35b-a3b (0/465 refusals; uncensored twin of
@@ -281,6 +295,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0, 1],
         "extra_args": ["--jinja"],
+        "sampling": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5},
         "est_vram_gb": 23,
     },
     # abliterated twin of agents-a1 (huihui). same card sampling as the base
@@ -294,6 +309,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0, 1],
         "extra_args": ["--jinja"],
+        "sampling": {"temperature": 0.85, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.1},
         "est_vram_gb": 23,
     },
     # abliterated twin of qwen3.6-27b-mtp (huihui), MTP drafter kept.
@@ -307,6 +323,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0, 1],
         "extra_args": ["--jinja", "-fa", "on", "--spec-type", "draft-mtp", "--spec-draft-n-max", "6"],
+        "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20},
         "est_vram_gb": 19,
     },
     # abliteration of lordx64's claude-4.7-opus reasoning distill of
@@ -326,6 +343,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0, 1],
         "extra_args": ["--jinja", "-fa", "on", "--spec-type", "draft-mtp", "--spec-draft-n-max", "6"],
+        "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20},
         "est_vram_gb": 23.5,
     },
 }

@@ -20,6 +20,7 @@ import html
 import inspect
 import json
 import re
+import subprocess
 import threading
 
 import requests
@@ -38,8 +39,24 @@ _vid_state = {"busy": False, "url": None, "error": None, "stack": None}
 
 # ---- statusline console (the one signature element) ----------------------
 
-def _console(led, head, log_path=None, link=None, note=None, err=None):
-    """led + one-line status + optional link/note/log tail, as safe html"""
+def _gpu_note():
+    """one-line per-gpu vram readout, or None off-gpu boxes"""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5)
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        return " · ".join(
+            f"gpu{i.strip()} {int(u) / 1024:.1f}/{int(t) / 1024:.0f}GB"
+            for i, u, t in (l.split(",") for l in out.stdout.strip().splitlines()))
+    except Exception:
+        return None
+
+
+def _console(led, head, log_path=None, link=None, note=None, err=None, gpu=False):
+    """led + one-line status + optional link/note/vram/log tail, as safe html"""
     parts = [f'<span class="km-led {led}">&#9679;</span> '
              f'<span class="km-head">{html.escape(head)}</span>']
     if link:
@@ -47,6 +64,8 @@ def _console(led, head, log_path=None, link=None, note=None, err=None):
         parts.append(f'<div class="km-note"><a href="{safe}" target="_blank">{safe}</a></div>')
     if note:
         parts.append(f'<div class="km-note">{html.escape(note)}</div>')
+    if gpu and (vram := _gpu_note()):
+        parts.append(f'<div class="km-note">{html.escape(vram)}</div>')
     if err:
         parts.append(f'<pre class="km-err">{html.escape(err)}</pre>')
     if log_path:
@@ -108,15 +127,28 @@ def _stop():
 def _status():
     if _state["busy"]:
         return _console("busy", f"launching {_state['model']} — build/download/load takes minutes",
-                        log_path=SERVER_LOG)
+                        log_path=SERVER_LOG, gpu=True)
     if _state["error"]:
         return _console("err", "launch failed", err=_state["error"], log_path=SERVER_LOG)
     if _state["url"]:
         return _console("live", f"{_state['model']} live",
                         link=_state["url"],
                         note=f"chat in the Chat tab · openai api at {_state['url']}/v1",
-                        log_path=SERVER_LOG)
-    return _console("idle", "nothing running — pick a model and press Launch")
+                        log_path=SERVER_LOG, gpu=True)
+    return _console("idle", "nothing running — pick a model and press Launch", gpu=True)
+
+
+def _harvest():
+    try:
+        from harness import harvest_cache
+        staged = harvest_cache()
+    except Exception as e:
+        return _console("err", "cache harvest failed", err=f"{type(e).__name__}: {e}")
+    if not staged:
+        return _console("idle", "nothing cacheable found (build/download something first)")
+    return _console("live", f"staged {len(staged)} files in /kaggle/working",
+                    note="Save Version → notebook Output tab → New Dataset. attach it to "
+                         "future notebooks; the harness auto-discovers it — boots drop to ~2 min")
 
 
 def _import_model(repo):
@@ -174,20 +206,24 @@ def _normalize_history(history):
     return msgs
 
 
-def _chat(message, history):
-    """streams from the local llama-server openai endpoint"""
+def _chat(message, history, system_prompt=""):
+    """streams from the local llama-server openai endpoint, applying the
+    registry entry's card-recommended sampling automatically"""
     if _state["busy"]:
         yield "model is still launching -- check Refresh in the Launch tab"
         return
-    msgs = _normalize_history(history)
+    msgs = ([{"role": "system", "content": system_prompt.strip()}]
+            if (system_prompt or "").strip() else [])
+    msgs += _normalize_history(history)
     msgs.append({"role": "user", "content": _to_text(message)})
     headers = ({"Authorization": f"Bearer {_state['api_key']}"}
                if _state["api_key"] else {})
+    payload = {"model": _state["model"] or "local", "messages": msgs, "stream": True}
+    payload.update(MODELS.get(_state["model"], {}).get("sampling") or {})
     try:
         r = requests.post(
             f"http://127.0.0.1:{_PORT}/v1/chat/completions",
-            json={"model": _state["model"] or "local", "messages": msgs, "stream": True},
-            headers=headers, stream=True, timeout=600)
+            json=payload, headers=headers, stream=True, timeout=600)
         r.raise_for_status()
         acc = ""
         for line in r.iter_lines():
@@ -439,6 +475,7 @@ def _build():
                         launch_btn = gr.Button("Launch", variant="primary")
                         stop_btn = gr.Button("Stop", variant="stop")
                         refresh_btn = gr.Button("Refresh")
+                        harvest_btn = gr.Button("Harvest cache")
                 with gr.Column(scale=6):
                     status = gr.Markdown(_status(), elem_classes="km-console")
                     with gr.Accordion("import a model from hugging face", open=False):
@@ -454,6 +491,7 @@ def _build():
                              outputs=status)
             stop_btn.click(_stop, outputs=status)
             refresh_btn.click(_status, outputs=status)
+            harvest_btn.click(_harvest, outputs=status)
             imp_btn.click(_import_model, inputs=imp_repo,
                           outputs=[model, quant, ctx, n_cpu_moe, imp_status])
         with gr.Tab("chat"):
@@ -465,7 +503,14 @@ def _build():
                 {"type": "messages"}
                 if "type" in inspect.signature(gr.ChatInterface.__init__).parameters
                 else {})
-            gr.ChatInterface(_chat, **chat_kwargs)
+            gr.ChatInterface(
+                _chat,
+                additional_inputs=[gr.Textbox(
+                    label="system prompt — optional; model identity/behavior lives here",
+                    value="")],
+                **chat_kwargs)
+            gr.Markdown('<div class="km-note">card-recommended sampling from the '
+                        'registry entry is applied automatically.</div>')
         with gr.Tab("image"):
             with gr.Row():
                 with gr.Column(scale=5):
@@ -504,9 +549,9 @@ def _build():
                 vid_stop_btn = gr.Button("Stop", variant="stop")
                 vid_refresh_btn = gr.Button("Refresh")
             vid_status = gr.Markdown(_vid_status(), elem_classes="km-console")
-            gr.Markdown('<div class="km-note">the url serves comfyui\'s full node gui — build '
-                        'workflows there. wants most of the box\'s vram: stop the llm first if it '
-                        'ooms. relaunching an llm recycles the tunnel slot — restart comfyui after.</div>')
+            gr.Markdown('<div class="km-note">the url serves comfyui\'s full node gui — any '
+                        'workflow jsons shipped with the stack appear in its workflow browser. '
+                        'wants most of the box\'s vram: stop the llm first if it ooms.</div>')
             with gr.Accordion("import a video pack from hugging face", open=False):
                 gr.Markdown("paste a comfyui-style repo (gguf pack or comfy-org repackage) — "
                             "files are mapped into comfyui's model dirs by their paths, one "

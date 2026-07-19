@@ -38,7 +38,7 @@ Models that aren't in the registry at all: `detect_entry("author/AnyModel-GGUF")
 ## UIs you get for free
 
 1. **llama-server chat UI** — the tunnel URL root serves a full chat web UI in any browser; the API lives at `<url>/v1`.
-2. **Gradio studio** — `run_studio.ipynb` (or `from control_panel import launch_panel; launch_panel(auth=("user","pass"))`): four tabs — Launch (llm + quant picker with sizes, launch/stop/status), Chat (streams from the running model), Image (diffusers on gpu 1, prompt → png in the browser), Video (boots ComfyUI and shows its GUI url). The share link is public — **always set auth** (the studio notebook generates a random password and prints it).
+2. **Gradio studio** — `run_studio.ipynb` (or `from control_panel import launch_panel; launch_panel(auth=("user","pass"))`): four tabs — Launch (llm + quant picker with sizes, launch/stop/status with per-GPU VRAM, cache harvest), Chat (streams from the running model, system-prompt box, card-recommended sampling applied automatically), Image (diffusers on gpu 1, prompt → png in the browser), Video (boots ComfyUI, shows its GUI url, ships stack workflow JSONs into its workflow browser). Every tab imports new models straight from HF. The share link is public — **always set auth** (the studio notebook generates a random password and prints it).
 3. **ComfyUI node GUI** — the video stack's tunnel URL serves the entire ComfyUI editor; build workflows in the browser, or export API-format JSON and drive it with `comfy.queue_workflow(...)`.
 
 ## Security
@@ -49,13 +49,13 @@ Models that aren't in the registry at all: `detect_entry("author/AnyModel-GGUF")
 
 One-time, at the end of a session that built things:
 
-1. Save these files from `/kaggle/tmp` into a private Kaggle Dataset (e.g. `llm-inference-cache`):
-   - `llama.cpp-<slug>/build/bin/llama-server` → name it `llama-server-<slug>` (per llama.cpp repo: mainline + each fork get their own; the build prints the exact tip)
-   - `cloudflared`
-   - the gguf files you actually use (hot models only — Datasets cap at ~100GB total)
-2. Next session: **Add Input** → attach the dataset, and set in `harness.py`:
-   `CACHE_DATASET_DIR = "/kaggle/input/llm-inference-cache"`
-3. The harness then copies binaries out (dataset mounts drop the executable bit — handled) and uses cached ggufs directly. No rebuilds, no re-downloads.
+1. Run `harvest_cache()` in a cell (or press **Harvest cache** in the studio) — it stages the built binaries, cloudflared, and this session's ggufs into `/kaggle/working` with the right names, watching the ~19.5GB quota.
+2. **Save Version** → notebook **Output** tab → **New Dataset**.
+3. Next session: **Add Input** → attach the dataset. That's it — the harness **auto-discovers** any attached dataset containing `llama-server-*`/`cloudflared`; `CACHE_DATASET_DIR` exists only to pin one when several are attached. Binaries are copied out and re-chmodded (dataset mounts drop the executable bit), cached ggufs are used directly.
+
+## Stable URL (optional, recommended)
+
+Quick tunnels mint a new `trycloudflare.com` URL every session, so anything you point at the API breaks daily. Free fix: Cloudflare dashboard → Zero Trust → Networks → Tunnels → create one, set its public hostname to `http://localhost:8080`, then add two Kaggle secrets: `CF_TUNNEL_TOKEN` (the tunnel token — required) and `CF_TUNNEL_HOSTNAME` (your hostname, so printed URLs are real). Export them like `HF_TOKEN` and the harness runs your named tunnel instead — **same URL every session**. Non-8080 ports (ComfyUI) still get quick tunnels.
 
 ## Troubleshooting
 
