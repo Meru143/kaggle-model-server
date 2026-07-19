@@ -22,6 +22,8 @@ import json
 import re
 import subprocess
 import threading
+import time
+import traceback
 
 import requests
 
@@ -32,9 +34,22 @@ from image_models import IMAGE_MODELS
 from model_registry import MODELS
 
 _PORT = 8080  # panel always launches on harness's default port
+STUDIO_LOG = "/kaggle/tmp/studio.log"  # full tracebacks from every studio action
 _state = {"busy": False, "url": None, "error": None, "model": None, "api_key": None}
-_img_state = {"busy": False, "pipe": None, "error": None, "model": None}
+_img_state = {"busy": False, "pipe": None, "error": None, "model": None,
+              "gen_busy": False, "gen_error": None, "last_image": None}
 _vid_state = {"busy": False, "url": None, "error": None, "stack": None}
+
+
+def _log_tb(context):
+    """append the current traceback to the studio log; return a short head"""
+    tb = traceback.format_exc()
+    try:
+        with open(STUDIO_LOG, "a") as f:
+            f.write(f"\n=== {time.strftime('%H:%M:%S')} {context}\n{tb}")
+    except OSError:
+        pass  # off-kaggle
+    return tb
 
 
 # ---- statusline console (the one signature element) ----------------------
@@ -108,6 +123,7 @@ def _launch(model_key, gguf_file, ctx, n_cpu_moe, api_key):
         try:
             _state["url"] = run(model_key, MODELS, api_key=api_key or None, **overrides)
         except Exception as e:
+            _log_tb(f"launch {model_key}")
             _state["error"] = f"{type(e).__name__}: {e}"
         finally:
             _state["busy"] = False
@@ -278,6 +294,7 @@ def _img_setup(key):
             # so denoiser + encoder overflow a single card)
             _img_state["pipe"] = image_models.load(key)
         except Exception as e:
+            _log_tb(f"image load {key}")
             _img_state["error"] = f"{type(e).__name__}: {e}"
         finally:
             _img_state["busy"] = False
@@ -291,21 +308,45 @@ def _img_status():
     if _img_state["busy"]:
         return _console("busy", f"loading {_img_state['model']} — pip install + checkpoint download")
     if _img_state["error"]:
-        return _console("err", "image model failed to load", err=_img_state["error"])
+        return _console("err", "image model failed to load", err=_img_state["error"],
+                        note=f"full traceback: {STUDIO_LOG}")
+    if _img_state["gen_busy"]:
+        return _console("busy", "generating — 30-90s on t4s; press Refresh", gpu=True)
+    if _img_state["gen_error"]:
+        return _console("err", "generation failed", err=_img_state["gen_error"],
+                        note=f"full traceback also in {STUDIO_LOG}")
+    if _img_state["last_image"]:
+        return _console("live", f"saved {_img_state['last_image']} — press Refresh after the next Generate")
     if _img_state["pipe"] is not None:
         return _console("live", f"{_img_state['model']} ready — write a prompt and press Generate")
     return _console("idle", "no image model loaded — pick one and press Install + load")
 
 
+def _img_refresh():
+    return _img_status(), _img_state["last_image"]
+
+
 def _img_generate(prompt, steps):
-    if _img_state["pipe"] is None:
-        return _img_status(), None
-    kwargs = {"num_inference_steps": int(steps)} if steps else {}
-    try:
-        path = image_models.generate(_img_state["pipe"], prompt, **kwargs)
-        return _console("live", f"saved {path}"), path
-    except Exception as e:
-        return _console("err", "generation failed", err=f"{type(e).__name__}: {e}"), None
+    """runs in the background: a t4 generation takes minutes, and holding the
+    request open that long gets killed by the share tunnel (the bare 'Error'
+    pills with no message). refresh pulls the result."""
+    if _img_state["pipe"] is None or _img_state["gen_busy"]:
+        return _img_refresh()
+
+    def work():
+        _img_state.update(gen_busy=True, gen_error=None, last_image=None)
+        try:
+            kwargs = {"num_inference_steps": int(steps)} if steps else {}
+            _img_state["last_image"] = image_models.generate(
+                _img_state["pipe"], prompt, **kwargs)
+        except Exception:
+            _img_state["gen_error"] = _log_tb("image generate")[-1500:]
+        finally:
+            _img_state["gen_busy"] = False
+
+    threading.Thread(target=work, daemon=True).start()
+    return _console("busy", "generating — 30-90s on t4s; press Refresh for the image",
+                    gpu=True), None
 
 
 # ---- video ---------------------------------------------------------------
@@ -344,6 +385,7 @@ def _vid_start(key):
             comfy.fetch_stack(key)
             _vid_state["url"] = comfy.start()
         except Exception as e:
+            _log_tb(f"video setup {key}")
             _vid_state["error"] = f"{type(e).__name__}: {e}"
         finally:
             _vid_state["busy"] = False
@@ -538,7 +580,7 @@ def _build():
                         img_imp_status = gr.Textbox(label="result", lines=4)
 
             img_setup_btn.click(_img_setup, inputs=img_model, outputs=img_status)
-            img_refresh_btn.click(_img_status, outputs=img_status)
+            img_refresh_btn.click(_img_refresh, outputs=[img_status, img_out])
             img_imp_btn.click(_import_image_model, inputs=img_imp_repo,
                               outputs=[img_model, img_imp_status])
             img_go.click(_img_generate, inputs=[img_prompt, img_steps],
