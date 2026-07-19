@@ -1,5 +1,11 @@
 """text-to-image on kaggle t4s via diffusers. registry + loader, no comfyui.
 
+dependency note: the model cards say "install diffusers from git" for the
+newer pipeline classes, but all four (ZImage, Krea2, Flux, Ideogram4) landed
+in the 0.39 stable release -- and git-main imports symbols from UNRELEASED
+huggingface_hub (CachedRepoTreeNotFoundError broke image loads on kaggle),
+so stable is pinned deliberately. environment beats card.
+
 usage from a notebook (see run_image.ipynb):
     from image_models import IMAGE_MODELS, install, load, generate
     install("z-image-turbo")
@@ -32,18 +38,14 @@ IMAGE_MODELS = {
     # really 8 dit forwards, and turbo models want guidance 0.
     "z-image-turbo": {
         "hf_repo": "Tongyi-MAI/Z-Image-Turbo",
-        # card says install diffusers from source for ZImagePipeline
-        "pip": ["git+https://github.com/huggingface/diffusers.git",
-                "transformers", "accelerate", "bitsandbytes"],
+        "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
         "quantize": ["transformer"],
         "defaults": {"num_inference_steps": 9, "guidance_scale": 0.0},
     },
-    # krea 2 turbo: 8 steps, guidance 0.0 (card). needs diffusers from git
-    # for Krea2Pipeline.
+    # krea 2 turbo: 8 steps, guidance 0.0 (card).
     "krea-2-turbo": {
         "hf_repo": "krea/Krea-2-Turbo",
-        "pip": ["git+https://github.com/huggingface/diffusers.git",
-                "transformers", "accelerate", "bitsandbytes"],
+        "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
         "quantize": ["transformer"],
         "defaults": {"num_inference_steps": 8, "guidance_scale": 0.0},
     },
@@ -51,7 +53,7 @@ IMAGE_MODELS = {
     # is what makes it fit a t4. card defaults: 50 steps, guidance 3.5.
     "flux1-dev": {
         "hf_repo": "black-forest-labs/FLUX.1-dev",
-        "pip": ["diffusers", "transformers", "accelerate", "bitsandbytes",
+        "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes",
                 "sentencepiece", "protobuf"],
         "quantize": ["transformer"],
         "gated": True,  # accept the license on the model page first
@@ -61,11 +63,10 @@ IMAGE_MODELS = {
     # the license on the model page first. card's diffusers path uses the
     # -diffusers repo (not ideogram-ai/ideogram-4-nf4 -- that layout is for
     # their own ideogram4 package). weights ship already-nf4, so no
-    # quantization pass here; Ideogram4Pipeline needs diffusers from git.
+    # quantization pass here.
     "ideogram-4": {
         "hf_repo": "ideogram-ai/ideogram-4-nf4-diffusers",
-        "pip": ["git+https://github.com/huggingface/diffusers.git",
-                "transformers", "accelerate", "bitsandbytes"],
+        "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
         "quantize": None,
         "gated": True,
         "defaults": {},  # card passes no steps/guidance -- pipeline defaults
@@ -77,7 +78,9 @@ def install(key):
     """pip-installs the model's exact requirements (and nothing more)"""
     pkgs = IMAGE_MODELS[key]["pip"]
     print(f"installing for {key}: {pkgs}")
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", *pkgs], check=True)
+    # -U so kaggle's preinstalled older diffusers/hub get upgraded to a
+    # consistent released set (pip's only-if-needed strategy leaves torch alone)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", *pkgs], check=True)
 
 
 def load(key, gpu: int = 0):
