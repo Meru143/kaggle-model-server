@@ -79,6 +79,62 @@ STACKS = {
 
 _LINGBOT_NODE_REPO = "https://github.com/RealRebelAI/ComfyUI_Rebels_LingBot"
 
+# comfyui model subdirs we can map hf paths onto by name
+_COMFY_DIRS = ("checkpoints", "clip", "clip_vision", "controlnet",
+               "diffusion_models", "latent_upscale_models", "loras", "sam",
+               "text_encoders", "unet", "upscale_models", "vae")
+
+
+def detect_stack(repo, quant=None):
+    """best-effort single-repo stack for STACKS: maps model files into comfyui
+    dirs via the repo's own path segments (comfy-org repackaged repos and gguf
+    packs follow this convention), keeping ONE unet gguf (~q4, <=13GB for a
+    t4; quant= picks by name instead). returns (files, skipped) where files is
+    STACKS-shaped [(repo, filename, subdir), ...].
+
+    honest limit: multi-repo recipes (encoders/vaes hosted elsewhere) can't be
+    machine-discovered -- the model card knows, the machine doesn't. those
+    still deserve a curated STACKS entry."""
+    from huggingface_hub import HfApi
+    info = HfApi().model_info(repo, files_metadata=True)
+    placed, denoisers, skipped = [], [], []
+    for s in info.siblings:
+        f = s.rfilename
+        if not f.lower().endswith((".gguf", ".safetensors", ".sft", ".pt")):
+            continue
+        gb = round((s.size or 0) / 1e9, 2)
+        segs = [p.lower() for p in f.split("/")[:-1]]
+        sub = next((d for d in _COMFY_DIRS if d in segs), None)
+        if sub in ("unet", "diffusion_models", "checkpoints"):
+            denoisers.append((f, gb, sub))
+        elif sub is None and f.lower().endswith(".gguf"):
+            # bare ggufs in video packs are unet quants by convention
+            denoisers.append((f, gb, "unet"))
+        elif sub:
+            placed.append((repo, f, sub))
+        else:
+            skipped.append(f)
+    if not denoisers:
+        raise ValueError(
+            f"{repo} has no comfy-mappable denoiser (unet/diffusion_models/"
+            f"checkpoints) -- not a video model pack? curated recipes live in STACKS.")
+    # exactly ONE denoiser: repos ship every quant/precision variant, and
+    # fetching them all is a 100GB mistake. companions (vae/clip/loras) are
+    # small and all kept.
+    if quant:
+        q = quant.lower()
+        cands = [d for d in denoisers if q in d[0].lower()] or denoisers
+    else:
+        cands = [d for d in denoisers if d[1] <= 13] or \
+                [min(denoisers, key=lambda d: d[1])]
+    pick = (next((d for d in cands if "q4_k_m" in d[0].lower()), None)
+            or next((d for d in cands if "q4" in d[0].lower()), None)
+            or next((d for d in cands if "fp8" in d[0].lower()), None)
+            or min(cands, key=lambda d: d[1]))
+    placed.insert(0, (repo, pick[0], pick[2]))
+    skipped += [d[0] for d in denoisers if d[0] != pick[0]]
+    return placed, skipped
+
 
 def _clone(url, dst):
     if os.path.exists(dst):

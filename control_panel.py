@@ -273,6 +273,29 @@ def _img_generate(prompt, steps):
 
 # ---- video ---------------------------------------------------------------
 
+def _import_video_stack(repo, quant):
+    """add a best-effort single-repo stack to the video dropdown"""
+    import gradio as gr
+    repo = (repo or "").strip().strip("/")
+    if repo.count("/") != 1:
+        return gr.update(), 'expected "author/repo-name" (e.g. realrebelai/SCAIL-2_GGUF)'
+    try:
+        files, skipped = comfy.detect_stack(repo, quant=(quant or "").strip() or None)
+    except Exception as e:
+        return gr.update(), f"import failed: {type(e).__name__}: {e}"
+    key = re.sub(r"[^a-z0-9.]+", "-", repo.split("/")[-1].lower()).strip("-")
+    key = re.sub(r"-(gguf|comfyui|gguf-comfyui)$", "", key)
+    comfy.STACKS[key] = files
+    lines = [f"added {key!r}:"]
+    lines += [f"  {f} -> models/{sub}/" for _, f, sub in files]
+    if skipped:
+        lines.append(f"  ({len(skipped)} other files skipped, e.g. {skipped[0]})")
+    lines.append("single-repo import: if the model card lists encoders/vae from OTHER "
+                 "repos, this stack is incomplete -- those need a curated STACKS entry "
+                 "in comfy_bootstrap.py (see ltx-2.3 / scail-2 for the shape).")
+    return gr.update(choices=sorted(comfy.STACKS), value=key), "\n".join(lines)
+
+
 def _vid_start(key):
     if _vid_state["busy"]:
         return _console("busy", "already setting up — press Refresh for progress")
@@ -484,10 +507,23 @@ def _build():
             gr.Markdown('<div class="km-note">the url serves comfyui\'s full node gui — build '
                         'workflows there. wants most of the box\'s vram: stop the llm first if it '
                         'ooms. relaunching an llm recycles the tunnel slot — restart comfyui after.</div>')
+            with gr.Accordion("import a video pack from hugging face", open=False):
+                gr.Markdown("paste a comfyui-style repo (gguf pack or comfy-org repackage) — "
+                            "files are mapped into comfyui's model dirs by their paths, one "
+                            "unet quant is picked for the t4. multi-repo recipes still need "
+                            "a curated stack.")
+                vid_imp_repo = gr.Textbox(label="repo id",
+                                          placeholder="realrebelai/SCAIL-2_GGUF")
+                vid_imp_quant = gr.Textbox(label="unet quant — blank = auto (~Q4, fits a t4)",
+                                           placeholder="Q3_K_M")
+                vid_imp_btn = gr.Button("Fetch and add", variant="primary")
+                vid_imp_status = gr.Textbox(label="result", lines=6)
 
             vid_start_btn.click(_vid_start, inputs=vid_stack, outputs=vid_status)
             vid_stop_btn.click(_vid_stop, outputs=vid_status)
             vid_refresh_btn.click(_vid_status, outputs=vid_status)
+            vid_imp_btn.click(_import_video_stack, inputs=[vid_imp_repo, vid_imp_quant],
+                              outputs=[vid_stack, vid_imp_status])
     return demo
 
 
