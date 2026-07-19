@@ -33,6 +33,8 @@ list_quants("qwen3.6-35b-a3b-hotswap", MODELS)  # every gguf in the repo, with s
 
 Unknown quant names fail fast **listing what the repo actually offers**, and a size check warns before you download something that won't fit (12GB single-T4 / 26GB dual). Edit `model_registry.py` only to change a *default*; a proven override deserves promotion into the registry.
 
+Models that aren't in the registry at all: `detect_entry("author/AnyModel-GGUF")` builds an entry automatically (best-fitting quant + single/dual-GPU placement from real file sizes) — same thing the studio's "import from hugging face" box does, which also prints a paste-ready registry line.
+
 ## UIs you get for free
 
 1. **llama-server chat UI** — the tunnel URL root serves a full chat web UI in any browser; the API lives at `<url>/v1`.
