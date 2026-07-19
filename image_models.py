@@ -250,7 +250,18 @@ def generate(pipe, prompt, **overrides):
     os.makedirs(OUT_DIR, exist_ok=True)
     params = {**getattr(pipe, "_km_defaults", {}), **overrides}
     t0 = time.time()
-    image = pipe(prompt, **params).images[0]
+    # sdpa backend order: flash needs sm80+ (t4 is sm75); memory-efficient
+    # (cutlass) runs on turing and keeps attention O(n); math is the eater
+    # of res^4 memory. ask for the middle tier explicitly -- torch's auto
+    # selection skips it for some shapes and lands on math.
+    try:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+        ctx = sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH])
+    except Exception:
+        import contextlib
+        ctx = contextlib.nullcontext()
+    with ctx:
+        image = pipe(prompt, **params).images[0]
     path = os.path.join(OUT_DIR, f"{int(time.time())}.png")
     image.save(path)
     import numpy as np
