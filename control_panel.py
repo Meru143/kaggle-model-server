@@ -87,14 +87,41 @@ def _status():
     return f"{head}\n\n--- last 40 lines of {SERVER_LOG} ---\n{_tail(SERVER_LOG, 40)}"
 
 
+def _to_text(content):
+    """gradio content may be a string or a list of content blocks"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, (list, tuple)):
+        return " ".join(
+            b.get("text", "") if isinstance(b, dict) else str(b)
+            for b in content if not (isinstance(b, dict) and "file" in b))
+    return str(content)
+
+
+def _normalize_history(history):
+    """gradio's chat history shape varies across versions (message dicts,
+    content-block lists, legacy [user, assistant] pairs -- 6.20 passes pairs
+    at runtime despite its own MessageDict type hints). accept them all."""
+    msgs = []
+    for m in history:
+        if isinstance(m, dict):
+            msgs.append({"role": m.get("role", "user"),
+                         "content": _to_text(m.get("content", ""))})
+        elif isinstance(m, (list, tuple)) and len(m) == 2:
+            for role, part in (("user", m[0]), ("assistant", m[1])):
+                if part:
+                    msgs.append({"role": role, "content": _to_text(part)})
+        # unknown shapes: skip rather than crash mid-chat
+    return msgs
+
+
 def _chat(message, history):
-    """streams from the local llama-server openai endpoint (history is
-    gradio type="messages": [{role, content}, ...])"""
+    """streams from the local llama-server openai endpoint"""
     if _state["busy"]:
         yield "model is still launching -- check refresh status in the Launch tab"
         return
-    msgs = [{"role": m["role"], "content": m["content"]} for m in history]
-    msgs.append({"role": "user", "content": message})
+    msgs = _normalize_history(history)
+    msgs.append({"role": "user", "content": _to_text(message)})
     headers = ({"Authorization": f"Bearer {_state['api_key']}"}
                if _state["api_key"] else {})
     try:
