@@ -207,6 +207,29 @@ def _chat(message, history):
 
 # ---- image ---------------------------------------------------------------
 
+def _import_image_model(repo):
+    """add any diffusers-format hf repo to the image dropdown"""
+    import gradio as gr
+    repo = (repo or "").strip().strip("/")
+    if repo.count("/") != 1:
+        return gr.update(), 'expected "author/repo-name" (e.g. Tongyi-MAI/Z-Image-Turbo)'
+    try:
+        entry = image_models.detect_image_entry(repo)
+    except Exception as e:
+        return gr.update(), f"import failed: {type(e).__name__}: {e}"
+    key = re.sub(r"[^a-z0-9.]+", "-", repo.split("/")[-1].lower()).strip("-")
+    IMAGE_MODELS[key] = entry
+    notes = ["transformer nf4-quantized for the t4" if entry["quantize"]
+             else "small enough to load fp16 as-is"]
+    if entry["gated"]:
+        notes.append("GATED: needs an HF_TOKEN secret + accepted license on the model page")
+    msg = (f"added {key!r} ({'; '.join(notes)})\n"
+           f"steps/guidance use the pipeline defaults -- check the model card and use "
+           f"the steps box to override. to keep it, paste into image_models.py:\n"
+           f'    "{key}": {json.dumps(entry)},')
+    return gr.update(choices=sorted(IMAGE_MODELS), value=key), msg
+
+
 def _img_setup(key):
     if _img_state["busy"]:
         return _console("busy", "already installing — press Refresh for progress")
@@ -436,9 +459,18 @@ def _build():
                 with gr.Column(scale=6):
                     img_status = gr.Markdown(_img_status(), elem_classes="km-console")
                     img_out = gr.Image(label="result")
+                    with gr.Accordion("import a diffusers model from hugging face", open=False):
+                        gr.Markdown("paste any diffusers-format repo id — gating and "
+                                    "nf4 need are auto-detected from the repo.")
+                        img_imp_repo = gr.Textbox(label="repo id",
+                                                  placeholder="Tongyi-MAI/Z-Image-Turbo")
+                        img_imp_btn = gr.Button("Fetch and add", variant="primary")
+                        img_imp_status = gr.Textbox(label="result", lines=4)
 
             img_setup_btn.click(_img_setup, inputs=img_model, outputs=img_status)
             img_refresh_btn.click(_img_status, outputs=img_status)
+            img_imp_btn.click(_import_image_model, inputs=img_imp_repo,
+                              outputs=[img_model, img_imp_status])
             img_go.click(_img_generate, inputs=[img_prompt, img_steps],
                          outputs=[img_status, img_out])
         with gr.Tab("video"):
