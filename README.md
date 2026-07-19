@@ -38,7 +38,7 @@ Models that aren't in the registry at all: `detect_entry("author/AnyModel-GGUF")
 ## UIs you get for free
 
 1. **llama-server chat UI** — the tunnel URL root serves a full chat web UI in any browser; the API lives at `<url>/v1`.
-2. **Gradio studio** — `run_studio.ipynb` (or `from control_panel import launch_panel; launch_panel(auth=("user","pass"))`): four tabs — Launch (llm + quant picker with sizes, launch/stop/status with per-GPU VRAM, cache harvest), Chat (streams from the running model, system-prompt box, card-recommended sampling applied automatically), Image (diffusers on gpu 1, prompt → png in the browser), Video (boots ComfyUI, shows its GUI url, ships stack workflow JSONs into its workflow browser). Every tab imports new models straight from HF. The share link is public — **always set auth** (the studio notebook generates a random password and prints it).
+2. **Gradio studio** — `run_studio.ipynb` (or `from control_panel import launch_panel; launch_panel(auth=("user","pass"))`): four tabs — Launch (llm + quant picker with sizes, launch/stop/status with per-GPU VRAM, cache harvest), Chat (streams from the running model, system-prompt box, card-recommended sampling applied automatically), Image (diffusers spread across both T4s, prompt → png in the browser), Video (boots ComfyUI, shows its GUI url, ships stack workflow JSONs into its workflow browser). Every tab imports new models straight from HF. The share link is public — **always set auth** (the studio notebook generates a random password and prints it).
 3. **ComfyUI node GUI** — the video stack's tunnel URL serves the entire ComfyUI editor; build workflows in the browser, or export API-format JSON and drive it with `comfy.queue_workflow(...)`.
 
 ## Security

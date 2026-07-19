@@ -274,15 +274,16 @@ def _img_setup(key):
         _img_state.update(busy=True, error=None, pipe=None, model=key)
         try:
             image_models.install(key)
-            # gpu 1 so image gen coexists with a llama-server on gpu 0
-            _img_state["pipe"] = image_models.load(key, gpu=1)
+            # components spread across both t4s (nf4 weights can't cpu-offload,
+            # so denoiser + encoder overflow a single card)
+            _img_state["pipe"] = image_models.load(key)
         except Exception as e:
             _img_state["error"] = f"{type(e).__name__}: {e}"
         finally:
             _img_state["busy"] = False
 
     threading.Thread(target=work, daemon=True).start()
-    return _console("busy", f"installing + loading {key} on gpu 1 — takes minutes",
+    return _console("busy", f"installing + loading {key} across both t4s — takes minutes",
                     note="press Refresh to follow progress")
 
 
@@ -522,7 +523,8 @@ def _build():
                     img_prompt = gr.Textbox(label="prompt", lines=3)
                     img_steps = gr.Number(label="steps — blank = model default", value=None)
                     img_go = gr.Button("Generate", variant="primary")
-                    gr.Markdown('<div class="km-note">runs on gpu 1, beside the llm on gpu 0. '
+                    gr.Markdown('<div class="km-note">spreads across both t4s — stop the llm '
+                                'first if vram is tight (the readout above shows both gpus). '
                                 'flux1-dev / ideogram-4 need an HF_TOKEN secret + accepted license.</div>')
                 with gr.Column(scale=6):
                     img_status = gr.Markdown(_img_status(), elem_classes="km-console")

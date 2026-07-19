@@ -110,11 +110,17 @@ def install(key):
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", *pkgs], check=True)
 
 
-def load(key, gpu: int = 0):
-    """returns a ready pipeline: fp16, transformer nf4 where needed, cpu offload.
+def load(key, gpu=None):
+    """returns a ready pipeline: fp16, denoiser nf4 where needed.
     DiffusionPipeline resolves the concrete class (ZImagePipeline, Krea2Pipeline,
     FluxPipeline, Ideogram4Pipeline) from the repo's model_index.json.
-    gpu=1 lets image gen share the box with a llama-server on gpu 0."""
+
+    placement -- gpu=None (default): spread components across BOTH t4s via
+    device_map="balanced". needed because bitsandbytes modules can't cpu-
+    offload: the nf4 denoiser stays resident, and denoiser + fp16 text
+    encoder together overflow one 15GB card (that's the OOM). stop a running
+    llm first if vram is tight. gpu=0/1: pin one gpu with cpu offload --
+    coexists with a llama-server, but only the smaller models fit."""
     import torch
     from diffusers import DiffusionPipeline
 
@@ -130,11 +136,15 @@ def load(key, gpu: int = 0):
                           "bnb_4bit_compute_dtype": torch.float16},
             components_to_quantize=cfg["quantize"],
         )
-    print(f"loading {cfg['hf_repo']} (first time downloads to the hf cache under /kaggle)")
+    dual = gpu is None and torch.cuda.device_count() >= 2
+    if dual:
+        kwargs["device_map"] = "balanced"
+    print(f"loading {cfg['hf_repo']} "
+          f"({'balanced across both gpus' if dual else f'gpu {gpu or 0} + cpu offload'})")
     pipe = DiffusionPipeline.from_pretrained(cfg["hf_repo"], **kwargs)
-    # one component on gpu at a time -- the 15GB t4 can't hold encoder +
-    # transformer + vae together for the bigger models
-    pipe.enable_model_cpu_offload(gpu_id=gpu)
+    if not dual:
+        # one component on gpu at a time; fine for the smaller models only
+        pipe.enable_model_cpu_offload(gpu_id=gpu or 0)
     pipe._km_defaults = dict(cfg["defaults"])
     return pipe
 
