@@ -110,6 +110,15 @@ STACKS = {
         ("Lightricks/LTX-2.3", "ltx-2.3-22b-distilled-lora-384.safetensors", "loras"),
         ("Lightricks/LTX-2.3", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "latent_upscale_models"),
     ],
+    # z-image turbo IMAGE gen in comfy -- the reliable path on t4: comfy's
+    # fp16 numerics work on bf16-less cards where the diffusers pipeline
+    # NaNs to black frames. Q8_0 is near-lossless at 7.2GB. use comfy's
+    # built-in z-image workflow template in the gui.
+    "z-image": [
+        ("unsloth/Z-Image-Turbo-GGUF", "z-image-turbo-Q8_0.gguf", "unet"),
+        ("Comfy-Org/z_image_turbo", "split_files/text_encoders/qwen_3_4b_fp8_mixed.safetensors", "text_encoders"),
+        ("Comfy-Org/z_image_turbo", "split_files/vae/ae.safetensors", "vae"),
+    ],
     # krea 2 turbo IMAGE gen in comfy (image ggufs run here, not llama.cpp).
     # companions per the vantage workflow: qwen3-vl encoder + qwen-image vae.
     "krea2-turbo": [

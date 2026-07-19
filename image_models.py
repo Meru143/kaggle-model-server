@@ -45,11 +45,13 @@ IMAGE_MODELS = {
         "quantize": None,
         "defaults": {"num_inference_steps": 9, "guidance_scale": 0.0},
     },
-    # krea 2 turbo: 8 steps, guidance 0.0 (card).
+    # krea 2 turbo: 8 steps, guidance 0.0 (card). encoder nf4'd too so the
+    # whole resident set (~10GB) fits one t4 -- see load() for why quantized
+    # models can't spread across gpus.
     "krea-2-turbo": {
         "hf_repo": "krea/Krea-2-Turbo",
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
-        "quantize": ["transformer"],
+        "quantize": ["transformer", "text_encoder"],
         "defaults": {"num_inference_steps": 8, "guidance_scale": 0.0},
     },
     # NON-COMMERCIAL license. 12b transformer + t5-xxl encoder; nf4 + offload
@@ -58,7 +60,8 @@ IMAGE_MODELS = {
         "hf_repo": "black-forest-labs/FLUX.1-dev",
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes",
                 "sentencepiece", "protobuf"],
-        "quantize": ["transformer"],
+        # text_encoder_2 is the 9.5GB t5; the small clip stays fp16
+        "quantize": ["transformer", "text_encoder_2"],
         "gated": True,  # accept the license on the model page first
         "defaults": {"num_inference_steps": 50, "guidance_scale": 3.5},
     },
@@ -70,7 +73,9 @@ IMAGE_MODELS = {
     "ideogram-4": {
         "hf_repo": "ideogram-ai/ideogram-4-nf4-diffusers",
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
-        "quantize": None,
+        # transformers ship pre-nf4; quantizing the 5.5GB encoder brings the
+        # resident set under one t4
+        "quantize": ["text_encoder"],
         "gated": True,
         "defaults": {},  # card passes no steps/guidance -- pipeline defaults
     },
@@ -79,7 +84,7 @@ IMAGE_MODELS = {
     "krea-2-raw": {
         "hf_repo": "krea/Krea-2-Raw",
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
-        "quantize": ["transformer"],
+        "quantize": ["transformer", "text_encoder"],
         "defaults": {"num_inference_steps": 52, "guidance_scale": 3.5},
     },
     # fal's 8-step distill of ideogram 4 (GATED, non-commercial lineage):
@@ -198,11 +203,14 @@ def load(key, gpu=None):
                 return self._dtype_anchor.dtype
 
         kwargs["unconditional_transformer"] = _ZeroUncond()
-    # transformer-swap entries stay on the single-gpu offload path: their
-    # nf4 denoiser (~5GB resident) + fp16 encoder (transient) fit one t4,
-    # and pipeline-level device_map with pre-passed components is untested
-    dual = (gpu is None and torch.cuda.device_count() >= 2
-            and not cfg.get("transformer_from"))
+    # bnb-quantized entries are pinned to one gpu: accelerate's "balanced"
+    # planner sizes the UNQUANTIZED checkpoint, decides it can't fit, and
+    # spills quantized modules to cpu -- which bitsandbytes forbids
+    # ("Some modules are dispatched on the CPU"). with encoders nf4'd too,
+    # each quantized model's resident set fits a single t4 anyway. only
+    # unquantized pipelines (z-image) spread across both gpus.
+    has_bnb = bool(cfg.get("quantize")) or bool(cfg.get("transformer_from"))
+    dual = gpu is None and torch.cuda.device_count() >= 2 and not has_bnb
     if dual:
         kwargs["device_map"] = "balanced"
     print(f"loading {cfg['hf_repo']} "
