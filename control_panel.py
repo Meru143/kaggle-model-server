@@ -625,8 +625,11 @@ def launch_panel(auth=None):
               'pass auth=("user", "pass").')
     demo = _build()
     # show_error surfaces the real message in the browser when an event
-    # fails client-side (instead of gradio's bare "Error" pill)
-    kwargs = dict(share=True, auth=auth, server_port=7860, show_error=True)
+    # fails client-side (instead of gradio's bare "Error" pill).
+    # allowed_paths: gradio only serves files from cwd/tempdir by default,
+    # and generated images live under /kaggle/tmp/outputs
+    kwargs = dict(share=True, auth=auth, server_port=7860, show_error=True,
+                  allowed_paths=[image_models.OUT_DIR])
     if _launch_takes_style(gr):
         kwargs.update(_style(gr))
     demo.launch(**kwargs)
