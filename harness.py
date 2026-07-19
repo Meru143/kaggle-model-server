@@ -14,6 +14,7 @@ logs: llama-server and cloudflared both write to files under WORK_DIR
 is your post-mortem tool.
 """
 
+import glob
 import os
 import re
 import shutil
@@ -25,12 +26,35 @@ import requests
 from huggingface_hub import HfApi, hf_hub_download, list_repo_files
 
 # ---- configurable paths -------------------------------------------------
-# if you've got a Kaggle Dataset with prebuilt binaries and/or cached gguf
-# weights, point this at it (attach the dataset to the notebook first, then
-# set the slug below). leave it as None and the harness bootstraps
-# everything fresh -- works with zero prior setup, just costs several
-# minutes of quota the first time each session.
+# cache dataset: leave None and the harness AUTO-DISCOVERS any attached
+# kaggle dataset that contains llama-server-* binaries or cloudflared (build
+# one with harvest_cache() at the end of a session). set a path only to pin
+# a specific dataset when several are attached.
 CACHE_DATASET_DIR = None  # e.g. "/kaggle/input/llm-inference-cache"
+
+_discovered_cache = None  # memo: None = not searched, False = none found
+
+
+def _cache_dir():
+    """explicit CACHE_DATASET_DIR wins; else scan /kaggle/input once for a
+    dataset that looks like our cache."""
+    global _discovered_cache
+    if CACHE_DATASET_DIR:
+        return CACHE_DATASET_DIR
+    if _discovered_cache is None:
+        _discovered_cache = False
+        try:
+            for d in sorted(os.listdir("/kaggle/input")):
+                p = f"/kaggle/input/{d}"
+                if os.path.isdir(p) and any(
+                        f == "cloudflared" or f.startswith("llama-server")
+                        for f in os.listdir(p)):
+                    _discovered_cache = p
+                    print(f"cache dataset auto-discovered: {p}")
+                    break
+        except OSError:
+            pass
+    return _discovered_cache or None
 
 # everything big lives on the ephemeral scratch volume, NOT /kaggle/working.
 # /kaggle/working is the ~20GB persistent-output volume -- a 20GB+ gguf
@@ -91,10 +115,11 @@ def ensure_llamacpp_binary(repo_url=None):
 
     # cached binary in the dataset? look for a per-repo name first, and let
     # a plain "llama-server" satisfy the mainline repo only.
-    if CACHE_DATASET_DIR:
+    cache = _cache_dir()
+    if cache:
         for name in ([f"llama-server-{slug}"] +
                      (["llama-server"] if repo_url == DEFAULT_LLAMACPP_REPO else [])):
-            cached = f"{CACHE_DATASET_DIR}/{name}"
+            cached = f"{cache}/{name}"
             if os.path.exists(cached):
                 local = f"{WORK_DIR}/{name}"
                 if not os.path.exists(local):
@@ -166,9 +191,10 @@ def ensure_cloudflared():
     found = shutil.which("cloudflared")
     if found:
         return found
-    if CACHE_DATASET_DIR and os.path.exists(f"{CACHE_DATASET_DIR}/cloudflared"):
+    cache = _cache_dir()
+    if cache and os.path.exists(f"{cache}/cloudflared"):
         if not os.path.exists(CLOUDFLARED_BIN):
-            _exec_copy(f"{CACHE_DATASET_DIR}/cloudflared", CLOUDFLARED_BIN)
+            _exec_copy(f"{cache}/cloudflared", CLOUDFLARED_BIN)
         return CLOUDFLARED_BIN
     if os.path.exists(CLOUDFLARED_BIN):
         return CLOUDFLARED_BIN
@@ -186,10 +212,13 @@ def ensure_cloudflared():
 # ---- weight bootstrap ---------------------------------------------------
 
 def _cached_weight_path(model_cfg):
-    if CACHE_DATASET_DIR:
-        candidate = f"{CACHE_DATASET_DIR}/{model_cfg['hf_file']}"
-        if os.path.exists(candidate):
-            return candidate
+    cache = _cache_dir()
+    if cache:
+        # subfoldered hf_files are stored flat in the dataset, so try both
+        for name in (model_cfg["hf_file"], os.path.basename(model_cfg["hf_file"])):
+            candidate = f"{cache}/{name}"
+            if os.path.exists(candidate):
+                return candidate
     return None
 
 
@@ -310,6 +339,49 @@ def _warn_if_over_budget(cfg):
               f"{'!' * 60}\n")
 
 
+def harvest_cache():
+    """stage everything cacheable into /kaggle/working so the notebook's
+    Output tab -> "New Dataset" turns it into the boot cache: built
+    llama-server binaries (per-repo names), cloudflared, and every gguf
+    downloaded this session. skips files that would blow the ~19.5GB
+    /kaggle/working quota. next session: attach the dataset -- the harness
+    auto-discovers it, no config needed. returns the staged filenames."""
+    out = "/kaggle/working"
+    if not os.path.isdir(out):
+        print("not on kaggle (/kaggle/working missing) -- nothing to do")
+        return []
+    budget = 19.0e9 - sum(
+        os.path.getsize(os.path.join(r, f))
+        for r, _, fs in os.walk(out) for f in fs)
+    staged, skipped = [], []
+
+    def stage(src, name):
+        nonlocal budget
+        size = os.path.getsize(src)
+        if size > budget:
+            skipped.append((name, size))
+            return
+        shutil.copy(src, os.path.join(out, name))
+        budget -= size
+        staged.append(name)
+
+    for build in glob.glob(f"{WORK_DIR}/llama.cpp-*/build/bin/llama-server"):
+        slug = build.split("llama.cpp-", 1)[1].split("/", 1)[0]
+        stage(build, f"llama-server-{slug}")
+    if os.path.exists(CLOUDFLARED_BIN):
+        stage(CLOUDFLARED_BIN, "cloudflared")
+    for gguf in sorted(glob.glob(f"{WORK_DIR}/*.gguf")):
+        stage(gguf, os.path.basename(gguf))
+
+    print(f"staged {len(staged)} files in {out}: {', '.join(staged) or '(none)'}")
+    for name, size in skipped:
+        print(f"skipped {name} ({size / 1e9:.1f}GB): /kaggle/working quota")
+    if staged:
+        print("next: Save Version (quick save) -> notebook Output tab -> New Dataset. "
+              "attach it to future notebooks and the harness finds it automatically.")
+    return staged
+
+
 # ---- server + tunnel lifecycle ------------------------------------------
 
 def stop():
@@ -399,17 +471,45 @@ def start_server(model_key, model_cfg, port=8080, api_key=None, health_timeout=6
     return proc
 
 
+def _tunnel_cmd(binary, port, token):
+    """named tunnel only for the default llm port -- the cloudflare ingress
+    maps one hostname to one local service; other ports get quick tunnels"""
+    if token and port == 8080:
+        return [binary, "tunnel", "run", "--token", token]
+    return [binary, "tunnel", "--url", f"http://localhost:{port}"]
+
+
 def start_tunnel(port=8080):
-    """launches a cloudflared quick tunnel, returns the public url.
-    swap the command for your named-tunnel invocation if you're not on quick tunnels."""
+    """launches a cloudflared tunnel, returns the public url.
+
+    with a CF_TUNNEL_TOKEN env var (kaggle secret) this runs your NAMED
+    tunnel instead of a throwaway quick tunnel -- the same hostname every
+    session. one-time setup: cloudflare dashboard -> zero trust -> networks
+    -> tunnels -> create, point its public hostname at http://localhost:8080,
+    save the token as the CF_TUNNEL_TOKEN secret (and the hostname as
+    CF_TUNNEL_HOSTNAME so the printed url is the real one)."""
     binary = ensure_cloudflared()
+    token = os.environ.get("CF_TUNNEL_TOKEN")
+    cmd = _tunnel_cmd(binary, port, token)
     log_fh = open(TUNNEL_LOG, "w")
     _current["log_fhs"].append(log_fh)
-    proc = subprocess.Popen(
-        [binary, "tunnel", "--url", f"http://localhost:{port}"],
-        stdout=log_fh, stderr=subprocess.STDOUT,
-    )
+    proc = subprocess.Popen(cmd, stdout=log_fh, stderr=subprocess.STDOUT)
     _current["tunnel"] = proc
+
+    if "--token" in cmd:
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    f"cloudflared (named tunnel) exited. tail of {TUNNEL_LOG}:\n{_tail(TUNNEL_LOG)}")
+            if "Registered tunnel connection" in _tail(TUNNEL_LOG, 200):
+                host = os.environ.get("CF_TUNNEL_HOSTNAME")
+                url = f"https://{host}" if host else "https://<your-tunnel-hostname>"
+                print("named tunnel connected -- same hostname every session")
+                return url
+            time.sleep(0.5)
+        raise RuntimeError(
+            f"named tunnel didn't connect in time. tail of {TUNNEL_LOG}:\n{_tail(TUNNEL_LOG)}")
 
     url_pattern = re.compile(r"https://[a-zA-Z0-9\-]+\.trycloudflare\.com")
     deadline = time.time() + 60
