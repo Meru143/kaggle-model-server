@@ -30,6 +30,8 @@ import time
 # quota-capped root/working volumes
 if os.path.isdir("/kaggle"):
     os.environ.setdefault("HF_HOME", "/kaggle/tmp/hf-home")
+    # reduces fragmentation-induced oom on long sessions
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 OUT_DIR = "/kaggle/tmp/outputs"
 
@@ -52,7 +54,8 @@ IMAGE_MODELS = {
         "hf_repo": "krea/Krea-2-Turbo",
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
         "quantize": ["transformer", "text_encoder"],
-        "defaults": {"num_inference_steps": 8, "guidance_scale": 0.0},
+        "defaults": {"num_inference_steps": 8, "guidance_scale": 0.0,
+                     "height": 768, "width": 768},
     },
     # NON-COMMERCIAL license. 12b transformer + t5-xxl encoder; nf4 + offload
     # is what makes it fit a t4. card defaults: 50 steps, guidance 3.5.
@@ -63,7 +66,8 @@ IMAGE_MODELS = {
         # text_encoder_2 is the 9.5GB t5; the small clip stays fp16
         "quantize": ["transformer", "text_encoder_2"],
         "gated": True,  # accept the license on the model page first
-        "defaults": {"num_inference_steps": 50, "guidance_scale": 3.5},
+        "defaults": {"num_inference_steps": 50, "guidance_scale": 3.5,
+                     "height": 768, "width": 768},
     },
     # GATED + NON-COMMERCIAL: needs HF_TOKEN (kaggle secret) and accepting
     # the license on the model page first. card's diffusers path uses the
@@ -77,7 +81,7 @@ IMAGE_MODELS = {
         # resident set under one t4
         "quantize": ["text_encoder"],
         "gated": True,
-        "defaults": {},  # card passes no steps/guidance -- pipeline defaults
+        "defaults": {"height": 768, "width": 768},  # steps/guidance: pipeline defaults
     },
     # krea 2 without the turbo distillation: better quality, 52 steps,
     # guidance 3.5 (card). same pipeline + nf4 treatment as the turbo.
@@ -85,7 +89,8 @@ IMAGE_MODELS = {
         "hf_repo": "krea/Krea-2-Raw",
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
         "quantize": ["transformer", "text_encoder"],
-        "defaults": {"num_inference_steps": 52, "guidance_scale": 3.5},
+        "defaults": {"num_inference_steps": 52, "guidance_scale": 3.5,
+                     "height": 768, "width": 768},
     },
     # fal's 8-step distill of ideogram 4 (GATED, non-commercial lineage):
     # a transformer-only repo dropped into the ideogram base pipeline. no
@@ -99,7 +104,8 @@ IMAGE_MODELS = {
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
         "quantize": None,
         "gated": True,
-        "defaults": {"num_inference_steps": 8, "guidance_scale": 1.0},
+        "defaults": {"num_inference_steps": 8, "guidance_scale": 1.0,
+                     "height": 768, "width": 768},
     },
     # fal's 20-step sibling of -instant: same recipe, more steps, better
     # detail (card). GATED like the rest of the ideogram family.
@@ -110,7 +116,8 @@ IMAGE_MODELS = {
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
         "quantize": None,
         "gated": True,
-        "defaults": {"num_inference_steps": 20, "guidance_scale": 1.0},
+        "defaults": {"num_inference_steps": 20, "guidance_scale": 1.0,
+                     "height": 768, "width": 768},
     },
 }
 
@@ -219,6 +226,14 @@ def load(key, gpu=None):
     if not dual:
         # one component on gpu at a time; fine for the smaller models only
         pipe.enable_model_cpu_offload(gpu_id=gpu or 0)
+    for helper in ("enable_attention_slicing", "enable_vae_tiling"):
+        # t4 sdpa uses the math backend (no flash kernels on sm75), which
+        # materializes the full attention matrix -- slicing shrinks the
+        # peak where the model supports it; harmless no-op where it doesn't
+        try:
+            getattr(pipe, helper)()
+        except Exception:
+            pass
     try:
         # fp16 vae decode is the classic source of NaN -> black frames
         # (cards assume bf16's range; t4 is fp16-only). vaes are tiny, so

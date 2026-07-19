@@ -346,7 +346,7 @@ def _img_refresh():
     return _img_status(), _img_state["last_image"]
 
 
-def _img_generate(prompt, steps):
+def _img_generate(prompt, steps, width, height):
     """runs in the background: a t4 generation takes minutes, and holding the
     request open that long gets killed by the share tunnel (the bare 'Error'
     pills with no message). refresh pulls the result."""
@@ -356,7 +356,13 @@ def _img_generate(prompt, steps):
     def work():
         _img_state.update(gen_busy=True, gen_error=None, last_image=None)
         try:
-            kwargs = {"num_inference_steps": int(steps)} if steps else {}
+            kwargs = {}
+            if steps:
+                kwargs["num_inference_steps"] = int(steps)
+            if width:
+                kwargs["width"] = int(width)
+            if height:
+                kwargs["height"] = int(height)
             _img_state["last_image"] = image_models.generate(
                 _img_state["pipe"], prompt, **kwargs)
         except Exception:
@@ -596,7 +602,13 @@ def _build():
                         img_setup_btn = gr.Button("Install + load", variant="primary")
                         img_refresh_btn = gr.Button("Refresh")
                     img_prompt = gr.Textbox(label="prompt", lines=3)
-                    img_steps = gr.Number(label="steps — blank = model default", value=None)
+                    with gr.Row():
+                        img_steps = gr.Number(label="steps — blank = default", value=None)
+                        img_w = gr.Number(label="width — blank = default", value=None)
+                        img_h = gr.Number(label="height — blank = default", value=None)
+                    gr.Markdown('<div class="km-note">quantized models default to 768² — '
+                                'attention at 1024² wants ~4GB the t4 doesn\'t have left. '
+                                'try 1024 only on z-image or via comfy.</div>')
                     img_go = gr.Button("Generate", variant="primary")
                     gr.Markdown('<div class="km-note">diffusers on a t4 is the experimental '
                                 'path — these models assume bf16, and fp16 overflow shows up as '
@@ -618,7 +630,7 @@ def _build():
             img_refresh_btn.click(_img_refresh, outputs=[img_status, img_out])
             img_imp_btn.click(_import_image_model, inputs=img_imp_repo,
                               outputs=[img_model, img_imp_status])
-            img_go.click(_img_generate, inputs=[img_prompt, img_steps],
+            img_go.click(_img_generate, inputs=[img_prompt, img_steps, img_w, img_h],
                          outputs=[img_status, img_out])
         with gr.Tab("video"):
             vid_stack = gr.Dropdown(choices=sorted(comfy.STACKS), value="ltx-2.3",
