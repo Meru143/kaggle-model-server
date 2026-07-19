@@ -35,11 +35,14 @@ OUT_DIR = "/kaggle/tmp/outputs"
 
 IMAGE_MODELS = {
     # easiest fit: 6b single-stream dit, 8-step distilled. card: 9 steps is
-    # really 8 dit forwards, and turbo models want guidance 0.
+    # really 8 dit forwards, and turbo models want guidance 0. runs
+    # UNQUANTIZED: the 12.3GB fp16 transformer fits one t4 under balanced
+    # placement, and nf4 on a few-step distill risks degenerate (black)
+    # output on top of the t4's fp16-range issues.
     "z-image-turbo": {
         "hf_repo": "Tongyi-MAI/Z-Image-Turbo",
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
-        "quantize": ["transformer"],
+        "quantize": None,
         "defaults": {"num_inference_steps": 9, "guidance_scale": 0.0},
     },
     # krea 2 turbo: 8 steps, guidance 0.0 (card).
@@ -208,6 +211,13 @@ def load(key, gpu=None):
     if not dual:
         # one component on gpu at a time; fine for the smaller models only
         pipe.enable_model_cpu_offload(gpu_id=gpu or 0)
+    try:
+        # fp16 vae decode is the classic source of NaN -> black frames
+        # (cards assume bf16's range; t4 is fp16-only). vaes are tiny, so
+        # fp32 costs nothing that matters.
+        pipe.vae.to(torch.float32)
+    except Exception as e:
+        print(f"vae fp32 upcast skipped: {e}")
     pipe._km_defaults = dict(cfg["defaults"])
     return pipe
 
@@ -220,6 +230,12 @@ def generate(pipe, prompt, **overrides):
     image = pipe(prompt, **params).images[0]
     path = os.path.join(OUT_DIR, f"{int(time.time())}.png")
     image.save(path)
+    import numpy as np
+    if np.asarray(image).max() <= 2:  # all-black frame = fp16 overflow (NaN latents)
+        print("WARNING: output is a black frame -- latents overflowed fp16 "
+              "somewhere upstream (t4 has no bf16). try more steps, a different "
+              "prompt length, or another model; if it persists for this model, "
+              "report it -- the fix is upcasting its hot component to fp32.")
     print(f"{path}  ({time.time() - t0:.1f}s, {params or 'pipeline defaults'})")
     return path
 
