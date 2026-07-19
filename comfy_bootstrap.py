@@ -126,6 +126,35 @@ STACKS = {
         ("Comfy-Org/Qwen3-VL", "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", "text_encoders"),
         ("Comfy-Org/Qwen-Image_ComfyUI", "split_files/vae/qwen_image_vae.safetensors", "vae"),
     ],
+    # krea 2 raw (image, 52-step quality tier): comfy-org's single-repo
+    # repack, fp8 storage dequanted on t4. comfy fallback for the diffusers
+    # entry in case fp16 blackframes it.
+    "krea2-raw": [
+        ("Comfy-Org/Krea-2", "diffusion_models/krea2_raw_fp8_scaled.safetensors", "diffusion_models"),
+        ("Comfy-Org/Krea-2", "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", "text_encoders"),
+        ("Comfy-Org/Krea-2", "vae/qwen_image_vae.safetensors", "vae"),
+    ],
+    # flux.1-dev (image): the classic low-vram comfy recipe -- city96 gguf
+    # unet + fp8 t5 + clip_l. the vae comes from the GATED bfl repo: needs
+    # HF_TOKEN + accepted flux license (same as running flux at all).
+    # Q8_0 is the community quality pick; unet="flux1-dev-Q4_K_S.gguf" for
+    # more headroom.
+    "flux1": [
+        ("city96/FLUX.1-dev-gguf", "flux1-dev-Q8_0.gguf", "unet"),
+        ("comfyanonymous/flux_text_encoders", "clip_l.safetensors", "text_encoders"),
+        ("comfyanonymous/flux_text_encoders", "t5xxl_fp8_e4m3fn.safetensors", "text_encoders"),
+        ("black-forest-labs/FLUX.1-dev", "ae.safetensors", "vae"),
+    ],
+    # ideogram 4 (image): comfy-org's complete official repack, fp8 storage.
+    # both transformers (conditional + cfg branch) + the 8b qwen3-vl encoder.
+    # GATED lineage upstream but this repack is open. comfy fallback for the
+    # diffusers ideogram entries.
+    "ideogram4": [
+        ("Comfy-Org/Ideogram-4", "diffusion_models/ideogram4_fp8_scaled.safetensors", "diffusion_models"),
+        ("Comfy-Org/Ideogram-4", "diffusion_models/ideogram4_unconditional_fp8_scaled.safetensors", "diffusion_models"),
+        ("Comfy-Org/Ideogram-4", "text_encoders/qwen3vl_8b_fp8_scaled.safetensors", "text_encoders"),
+        ("Comfy-Org/Ideogram-4", "vae/flux2-vae.safetensors", "vae"),
+    ],
     # krea 2 turbo HD finetune (image): ships its own hd-tuned vae; same
     # qwen3-vl encoder. Q6_K (10.9GB) is the quality pick if vram allows.
     "krea2-hd": [

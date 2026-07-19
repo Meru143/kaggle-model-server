@@ -598,9 +598,11 @@ def _build():
                     img_prompt = gr.Textbox(label="prompt", lines=3)
                     img_steps = gr.Number(label="steps — blank = model default", value=None)
                     img_go = gr.Button("Generate", variant="primary")
-                    gr.Markdown('<div class="km-note">spreads across both t4s — stop the llm '
-                                'first if vram is tight (the readout above shows both gpus). '
-                                'flux1-dev / ideogram-4 need an HF_TOKEN secret + accepted license.</div>')
+                    gr.Markdown('<div class="km-note">diffusers on a t4 is the experimental '
+                                'path — these models assume bf16, and fp16 overflow shows up as '
+                                'black frames. every model here has a proven comfyui fallback in '
+                                'the video tab (z-image, krea2-turbo/raw/hd, flux1, ideogram4). '
+                                'flux / ideogram need an HF_TOKEN + accepted license.</div>')
                 with gr.Column(scale=6):
                     img_status = gr.Markdown(_img_status(), elem_classes="km-console")
                     img_out = gr.Image(label="result")
