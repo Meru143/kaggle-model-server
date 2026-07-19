@@ -28,14 +28,16 @@ import requests
 if os.path.isdir("/kaggle"):
     os.environ.setdefault("HF_HOME", "/kaggle/tmp/hf-home")
 
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, list_repo_files
 
 from harness import WORK_DIR, _tail, start_tunnel
+from harness import _current as _harness_state
 
 COMFY_DIR = f"{WORK_DIR}/ComfyUI"
 COMFY_LOG = f"{WORK_DIR}/comfyui.log"
 
-_current = {"proc": None, "log_fh": None, "port": None}
+_current = {"proc": None, "log_fh": None, "port": None,
+            "tunnel": None, "tunnel_fh": None}
 
 # model stacks: (hf_repo, filename_in_repo, ComfyUI/models subdir).
 # filenames verified against the repos (and the scail-2 / ltx cards' own
@@ -172,6 +174,22 @@ def _place(repo, filename, subdir):
     return dst
 
 
+def _place_workflows(repos):
+    """any workflow json shipped in a stack's repos lands in the gui's
+    workflow browser, so the first video isn't 'build a graph from scratch'"""
+    wf_dir = f"{COMFY_DIR}/user/default/workflows"
+    for repo in sorted(repos):
+        try:
+            for f in list_repo_files(repo):
+                if f.lower().endswith(".json") and "workflow" in f.lower():
+                    local = hf_hub_download(repo_id=repo, filename=f, local_dir=WORK_DIR)
+                    os.makedirs(wf_dir, exist_ok=True)
+                    shutil.copy(local, os.path.join(wf_dir, os.path.basename(f)))
+                    print(f"workflow -> gui browser: {os.path.basename(f)}")
+        except Exception as e:  # workflows are a bonus, never a blocker
+            print(f"workflow scan skipped for {repo}: {e}")
+
+
 def fetch_stack(key, unet=None):
     """downloads a named model set and symlinks it into comfyui's model dirs.
     unet= overrides just the unet gguf filename (e.g. a different quant)."""
@@ -189,6 +207,7 @@ def fetch_stack(key, unet=None):
             filename = unet
         print(f"fetching {repo} :: {filename} -> models/{subdir}/")
         _place(repo, filename, subdir)
+    _place_workflows({repo for repo, _, _ in files})
     print(f"stack {key!r} in place")
 
 
@@ -220,6 +239,12 @@ def start(port=8188):
         raise RuntimeError(f"comfyui not up within 180s. tail of {COMFY_LOG}:\n{_tail(COMFY_LOG)}")
 
     url = start_tunnel(port)
+    # take ownership of the tunnel proc: an llm relaunch calls harness.stop(),
+    # which must not tear down the video tunnel
+    _current["tunnel"] = _harness_state["tunnel"]
+    _harness_state["tunnel"] = None
+    if _harness_state["log_fhs"]:
+        _current["tunnel_fh"] = _harness_state["log_fhs"].pop()
     print(f"comfyui live at {url} (open it in a browser for the node gui)")
     return url
 
@@ -256,20 +281,22 @@ def queue_workflow(workflow, timeout=3600):
 
 
 def stop():
-    """terminates the comfyui process cleanly, if one is up"""
-    proc = _current["proc"]
-    if proc and proc.poll() is None:
-        proc.send_signal(signal.SIGTERM)
-        try:
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        print("stopped comfyui")
-    _current["proc"] = None
-    if _current["log_fh"]:
-        try:
-            _current["log_fh"].close()
-        except OSError:
-            pass
-    _current["log_fh"] = None
+    """terminates the comfyui process (and its tunnel) cleanly, if up"""
+    for key in ("proc", "tunnel"):
+        proc = _current[key]
+        if proc and proc.poll() is None:
+            proc.send_signal(signal.SIGTERM)
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        _current[key] = None
+    for key in ("log_fh", "tunnel_fh"):
+        if _current[key]:
+            try:
+                _current[key].close()
+            except OSError:
+                pass
+        _current[key] = None
     _current["port"] = None
+    print("stopped comfyui")
