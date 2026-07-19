@@ -19,6 +19,7 @@ motion; 150ms state feedback, reduced-motion respected.
 import html
 import inspect
 import json
+import os
 import re
 import subprocess
 import threading
@@ -89,6 +90,25 @@ def _console(led, head, log_path=None, link=None, note=None, err=None, gpu=False
 
 
 # ---- llm launch ----------------------------------------------------------
+
+def _set_hf_token(tok):
+    """stash the token in the env (everything downstream reads HF_TOKEN at
+    call time) and validate it with a whoami. never echo the token back."""
+    import gradio as gr
+    tok = (tok or "").strip()
+    if not tok:
+        os.environ.pop("HF_TOKEN", None)
+        return gr.update(value=""), "token cleared"
+    os.environ["HF_TOKEN"] = tok
+    try:
+        from huggingface_hub import HfApi
+        user = HfApi(token=tok).whoami()["name"]
+        msg = (f"token set — authenticated as {user}. gated models still need "
+               f"their license accepted on the model page (one click, once).")
+    except Exception as e:
+        msg = f"token stored, but hf rejected it ({type(e).__name__}) — double-check it"
+    return gr.update(value=""), msg
+
 
 def _on_model_change(model_key):
     import gradio as gr
@@ -502,6 +522,19 @@ def _build():
     style = {} if _launch_takes_style(gr) else _style(gr)
     with gr.Blocks(title="kaggle model server", **style) as demo:
         gr.Markdown(_HDR, elem_id="km-hdr")
+        with gr.Accordion("hf token — needed for gated models (flux, ideogram, fal)",
+                          open=False):
+            with gr.Row():
+                tok_box = gr.Textbox(label="paste token (hf_...)", type="password",
+                                     scale=4)
+                tok_btn = gr.Button("Save token", variant="primary", scale=1)
+            tok_status = gr.Textbox(
+                label="status", lines=2,
+                value=("HF_TOKEN already set from the environment"
+                       if os.environ.get("HF_TOKEN") else
+                       "no token set — fine for ungated models. get one at "
+                       "huggingface.co/settings/tokens (read access)"))
+            tok_btn.click(_set_hf_token, inputs=tok_box, outputs=[tok_box, tok_status])
         with gr.Tab("launch"):
             with gr.Row():
                 with gr.Column(scale=5):
