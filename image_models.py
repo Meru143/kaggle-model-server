@@ -80,10 +80,11 @@ def install(key):
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", *pkgs], check=True)
 
 
-def load(key):
+def load(key, gpu: int = 0):
     """returns a ready pipeline: fp16, transformer nf4 where needed, cpu offload.
     DiffusionPipeline resolves the concrete class (ZImagePipeline, Krea2Pipeline,
-    FluxPipeline, Ideogram4Pipeline) from the repo's model_index.json."""
+    FluxPipeline, Ideogram4Pipeline) from the repo's model_index.json.
+    gpu=1 lets image gen share the box with a llama-server on gpu 0."""
     import torch
     from diffusers import DiffusionPipeline
 
@@ -103,7 +104,7 @@ def load(key):
     pipe = DiffusionPipeline.from_pretrained(cfg["hf_repo"], **kwargs)
     # one component on gpu at a time -- the 15GB t4 can't hold encoder +
     # transformer + vae together for the bigger models
-    pipe.enable_model_cpu_offload()
+    pipe.enable_model_cpu_offload(gpu_id=gpu)
     pipe._km_defaults = dict(cfg["defaults"])
     return pipe
 

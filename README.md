@@ -15,7 +15,7 @@ Serve real AI models from Kaggle's free tier (2× Tesla T4) and reach them from 
 | Notebook | Stack | Open it when you want |
 |---|---|---|
 | `run_model.ipynb` | llama.cpp LLMs | an OpenAI-compatible chat/completions API + built-in chat UI |
-| `run_studio.ipynb` | llama.cpp LLMs | the point-and-click studio: Run All → link → pick model, launch, chat |
+| `run_studio.ipynb` | all three | the point-and-click studio: Launch/Chat/Image/Video tabs from one link |
 | `run_image.ipynb` | diffusers txt2img | PNGs from prompts in notebook cells (z-image / krea / flux / ideogram) |
 | `run_video.ipynb` | headless ComfyUI | video generation (ltx-2.3, scail-2, lingbot) with the full node GUI |
 
@@ -36,7 +36,7 @@ Unknown quant names fail fast **listing what the repo actually offers**, and a s
 ## UIs you get for free
 
 1. **llama-server chat UI** — the tunnel URL root serves a full chat web UI in any browser; the API lives at `<url>/v1`.
-2. **Gradio studio** — `run_studio.ipynb` (or `from control_panel import launch_panel; launch_panel(auth=("user","pass"))`): a Launch tab (model + quant picker with sizes, launch/stop/status) and a Chat tab that streams from whatever model is up. The share link is public — **always set auth** (the studio notebook generates a random password and prints it).
+2. **Gradio studio** — `run_studio.ipynb` (or `from control_panel import launch_panel; launch_panel(auth=("user","pass"))`): four tabs — Launch (llm + quant picker with sizes, launch/stop/status), Chat (streams from the running model), Image (diffusers on gpu 1, prompt → png in the browser), Video (boots ComfyUI and shows its GUI url). The share link is public — **always set auth** (the studio notebook generates a random password and prints it).
 3. **ComfyUI node GUI** — the video stack's tunnel URL serves the entire ComfyUI editor; build workflows in the browser, or export API-format JSON and drive it with `comfy.queue_workflow(...)`.
 
 ## Security

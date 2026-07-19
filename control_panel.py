@@ -22,11 +22,16 @@ import threading
 
 import requests
 
+import comfy_bootstrap as comfy
+import image_models
 from harness import SERVER_LOG, _tail, list_quants, run, stop
+from image_models import IMAGE_MODELS
 from model_registry import MODELS
 
 _PORT = 8080  # panel always launches on harness's default port
 _state = {"busy": False, "url": None, "error": None, "model": None, "api_key": None}
+_img_state = {"busy": False, "pipe": None, "error": None, "model": None}
+_vid_state = {"busy": False, "url": None, "error": None, "stack": None}
 
 
 def _on_model_change(model_key):
@@ -147,6 +152,82 @@ def _chat(message, history):
                "launch one in the Launch tab first")
 
 
+def _img_setup(key):
+    if _img_state["busy"]:
+        return "already installing/loading -- click refresh"
+
+    def work():
+        _img_state.update(busy=True, error=None, pipe=None, model=key)
+        try:
+            image_models.install(key)
+            # gpu 1 so image gen coexists with a llama-server on gpu 0
+            _img_state["pipe"] = image_models.load(key, gpu=1)
+        except Exception as e:
+            _img_state["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            _img_state["busy"] = False
+
+    threading.Thread(target=work, daemon=True).start()
+    return f"installing + loading {key} on gpu 1 (pip + weights download -- minutes)... click refresh"
+
+
+def _img_status():
+    if _img_state["busy"]:
+        return f"LOADING {_img_state['model']} -- pip install + checkpoint download takes minutes"
+    if _img_state["error"]:
+        return f"FAILED: {_img_state['error']}"
+    if _img_state["pipe"] is not None:
+        return f"{_img_state['model']} ready -- prompt away"
+    return "no image model loaded"
+
+
+def _img_generate(prompt, steps):
+    if _img_state["pipe"] is None:
+        return _img_status(), None
+    kwargs = {"num_inference_steps": int(steps)} if steps else {}
+    try:
+        path = image_models.generate(_img_state["pipe"], prompt, **kwargs)
+        return f"saved {path}", path
+    except Exception as e:
+        return f"generation failed: {type(e).__name__}: {e}", None
+
+
+def _vid_start(key):
+    if _vid_state["busy"]:
+        return "already setting up -- click refresh"
+
+    def work():
+        _vid_state.update(busy=True, url=None, error=None, stack=key)
+        try:
+            comfy.install()
+            comfy.fetch_stack(key)
+            _vid_state["url"] = comfy.start()
+        except Exception as e:
+            _vid_state["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            _vid_state["busy"] = False
+
+    threading.Thread(target=work, daemon=True).start()
+    return f"installing comfyui + fetching {key} (15-25GB first time)... click refresh"
+
+
+def _vid_status():
+    if _vid_state["busy"]:
+        return (f"SETTING UP {_vid_state['stack']} -- big downloads, be patient "
+                f"(log: /kaggle/tmp/comfyui.log)")
+    if _vid_state["error"]:
+        return f"FAILED: {_vid_state['error']}"
+    if _vid_state["url"]:
+        return f"comfyui node gui LIVE AT: {_vid_state['url']}"
+    return "comfyui not running"
+
+
+def _vid_stop():
+    comfy.stop()
+    _vid_state.update(url=None, error=None, stack=None)
+    return "stopped comfyui"
+
+
 def _build():
     import gradio as gr
 
@@ -182,6 +263,40 @@ def _build():
                 if "type" in inspect.signature(gr.ChatInterface.__init__).parameters
                 else {})
             gr.ChatInterface(_chat, **chat_kwargs)
+        with gr.Tab("Image"):
+            gr.Markdown("loads on **gpu 1**, so it runs beside an llm on gpu 0. "
+                        "flux1-dev / ideogram-4 need an HF_TOKEN secret + accepted license.")
+            img_model = gr.Dropdown(choices=sorted(IMAGE_MODELS), value="z-image-turbo",
+                                    label="image model")
+            img_status = gr.Textbox(label="status", lines=2)
+            with gr.Row():
+                img_setup_btn = gr.Button("Install + load", variant="primary")
+                img_refresh_btn = gr.Button("Refresh status")
+            img_prompt = gr.Textbox(label="prompt")
+            img_steps = gr.Number(label="steps (blank = model default)", value=None)
+            img_go = gr.Button("Generate", variant="primary")
+            img_out = gr.Image(label="result")
+
+            img_setup_btn.click(_img_setup, inputs=img_model, outputs=img_status)
+            img_refresh_btn.click(_img_status, outputs=img_status)
+            img_go.click(_img_generate, inputs=[img_prompt, img_steps],
+                         outputs=[img_status, img_out])
+        with gr.Tab("Video"):
+            gr.Markdown("boots headless comfyui + tunnels its **full node gui** -- "
+                        "open the printed url to build workflows. wants most of the "
+                        "box's vram: stop the llm first if things oom. relaunching an "
+                        "llm recycles the tunnel slot -- restart comfyui after.")
+            vid_stack = gr.Dropdown(choices=sorted(comfy.STACKS), value="ltx-2.3",
+                                    label="stack")
+            vid_status = gr.Textbox(label="status", lines=3)
+            with gr.Row():
+                vid_start_btn = gr.Button("Install + start", variant="primary")
+                vid_stop_btn = gr.Button("Stop")
+                vid_refresh_btn = gr.Button("Refresh status")
+
+            vid_start_btn.click(_vid_start, inputs=vid_stack, outputs=vid_status)
+            vid_stop_btn.click(_vid_stop, outputs=vid_status)
+            vid_refresh_btn.click(_vid_status, outputs=vid_status)
     return demo
 
 
