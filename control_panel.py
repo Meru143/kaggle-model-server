@@ -201,7 +201,7 @@ def _import_model(repo):
         return (gr.update(), gr.update(), gr.update(), gr.update(),
                 'expected "author/repo-name" (e.g. bartowski/SomeModel-GGUF)')
     try:
-        entry = detect_entry(repo)
+        entry = detect_entry(repo, read_card=True)  # also scans the card for flags
     except Exception as e:
         return (gr.update(), gr.update(), gr.update(), gr.update(),
                 f"import failed: {type(e).__name__}: {e}")
@@ -210,8 +210,15 @@ def _import_model(repo):
     MODELS[key] = entry
     quant_update, ctx_update, moe_update = _on_model_change(key)
     gpus = "both t4s" if entry["tensor_split"] else "one t4"
+    card_bits = []
+    if entry.get("sampling"):
+        card_bits.append("sampling " + ", ".join(f"{k}={v}" for k, v in entry["sampling"].items()))
+    if entry.get("extra_args") != ["--jinja"]:
+        card_bits.append("flags " + " ".join(entry["extra_args"]))
+    card_line = ("from card (verify): " + " · ".join(card_bits) + "\n") if card_bits else \
+                "no recipe found in the card — using --jinja + default sampling\n"
     msg = (f"added {key!r}: {entry['hf_file']} ({entry['est_vram_gb'] - 2:.1f}GB -> {gpus})\n"
-           f"defaults are auto-detected guesses -- check the model card for sampling/MTP flags.\n"
+           f"{card_line}"
            f"to keep it permanently, paste into model_registry.py:\n"
            f'    "{key}": {json.dumps(entry)},')
     return (gr.update(choices=sorted(MODELS), value=key),

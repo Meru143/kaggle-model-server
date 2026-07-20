@@ -21,6 +21,7 @@ import shutil
 import signal
 import subprocess
 import time
+from collections import Counter
 
 import requests
 from huggingface_hub import HfApi, hf_hub_download, list_repo_files
@@ -357,7 +358,85 @@ def list_quants(model_key, registry):
     return rows
 
 
-def detect_entry(repo, quant=None):
+# card-scan: sampling key aliases -> llama-server/openai names
+_CANON_SAMPLE = {
+    "temperature": "temperature", "temp": "temperature",
+    "topp": "top_p", "topk": "top_k", "minp": "min_p",
+    "presencepenalty": "presence_penalty",
+    "repetitionpenalty": "repeat_penalty", "repeatpenalty": "repeat_penalty",
+    "frequencypenalty": "frequency_penalty",
+}
+
+
+def read_card_flags(repo, filename=None):
+    """best-effort scan of a model card for its recommended sampling params
+    and speculative-decoding flags -> {sampling, extra_args, notes}. this is
+    regex heuristics, NOT an llm: cards list several modes and phrase things
+    freely, so treat the result as SUGGESTIONS to verify. first value per key
+    wins (cards usually lead with the general/default mode). {} on failure.
+
+    filename gates the mtp flags: a card can discuss MTP because the repo ships
+    separate -MTP- variants, but those flags only work on a gguf that actually
+    has the drafter head -- so only suggest them when the chosen file (or the
+    repo) is itself MTP."""
+    try:
+        p = hf_hub_download(repo, "README.md", token=os.environ.get("HF_TOKEN"))
+        text = open(p, encoding="utf-8", errors="replace").read()
+    except Exception:
+        return {}
+    low = text.lower()
+    sampling = {}
+    # separator between key and value tolerates the forms cards actually use:
+    #   `temperature`: 0.85   **temp** = 1.0   --temp 0.6   | top_p | 0.95 |
+    # bounded to <=6 chars of space/backtick/bold/pipe/=/: so it can't bridge
+    # across prose words (letters aren't in the class, which stops false hits)
+    pat = re.compile(
+        r"\b(temp(?:erature)?|top[_\- ]?p|top[_\- ]?k|min[_\- ]?p|"
+        r"presence[_\- ]penalty|repe(?:tition|at)[_\- ]penalty|frequency[_\- ]penalty)"
+        r"[\s`*|=:]{1,6}([0-9]+(?:\.[0-9]+)?)", re.I)
+    # neutral no-ops -- omit so suggestions stay clean (matches how the
+    # registry entries were hand-authored)
+    _noop = {"min_p": 0.0, "presence_penalty": 0.0, "frequency_penalty": 0.0,
+             "repeat_penalty": 1.0, "top_k": 0}
+    buckets = {}
+    for m in pat.finditer(text):
+        canon = re.sub(r"[_\- ]", "", m.group(1).lower())
+        key = _CANON_SAMPLE.get(canon)
+        if not key:
+            continue
+        v = m.group(2)
+        buckets.setdefault(key, []).append(
+            int(v) if key == "top_k" and "." not in v else float(v))
+    # most frequent value per key: the real recommended value is repeated
+    # across the card's mode recipes, while stray mentions appear once
+    for key, vals in buckets.items():
+        val = Counter(vals).most_common(1)[0][0]
+        if _noop.get(key) != val:
+            sampling[key] = val
+    extra, notes = [], []
+    if "--jinja" in low or "chat_template" in low or "tool call" in low or "tool-call" in low:
+        extra.append("--jinja")
+    is_mtp = "mtp" in (filename or "").lower() or "mtp" in repo.lower()
+    if "draft-mtp" in low and is_mtp:  # speculative-decoding drafter
+        if "--jinja" not in extra:
+            extra.append("--jinja")
+        if re.search(r"-fa\s+on|flash[\- ]?attn", low):
+            extra += ["-fa", "on"]
+        extra += ["--spec-type", "draft-mtp"]
+        mm = re.search(r"spec-draft-n-max\s+(\d+)", low)
+        extra += ["--spec-draft-n-max", mm.group(1) if mm else "2"]
+        notes.append("mtp drafter detected")
+    out = {}
+    if sampling:
+        out["sampling"] = sampling
+    if extra:
+        out["extra_args"] = extra
+    if notes:
+        out["notes"] = "; ".join(notes)
+    return out
+
+
+def detect_entry(repo, quant=None, read_card=False):
     """build a registry-style entry for an arbitrary gguf repo, auto-detecting
     the file and gpu placement from real file sizes: prefers ~Q4_K_M among
     files fitting the dual-t4 budget (<=26GB), then decides single vs dual t4
@@ -383,7 +462,7 @@ def detect_entry(repo, quant=None):
                       or next((g for g in fitting if "q4" in g[0].lower()), None)
                       or max(fitting, key=lambda g: g[1]))
     single = size <= 12
-    return {
+    entry = {
         "hf_repo": repo,
         "hf_file": name,
         "ctx": 8192,
@@ -396,6 +475,16 @@ def detect_entry(repo, quant=None):
         "extra_args": ["--jinja"],
         "est_vram_gb": round(size + 2, 1),  # file + rough kv/buffers at 8k ctx
     }
+    if read_card:
+        # pull the card's recommended sampling + mtp flags over the file-only
+        # defaults (best-effort; the card overrides the blanket --jinja).
+        # pass the chosen file so mtp flags only apply to an mtp gguf.
+        card = read_card_flags(repo, filename=name)
+        if card.get("sampling"):
+            entry["sampling"] = card["sampling"]
+        if card.get("extra_args"):
+            entry["extra_args"] = card["extra_args"]
+    return entry
 
 
 def _warn_if_over_budget(cfg):
