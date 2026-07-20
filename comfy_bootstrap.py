@@ -194,6 +194,13 @@ def image_stacks():
     return sorted(k for k in STACKS if k in IMAGE_STACKS)
 
 
+def stack_repo(key):
+    """the stack's primary (first/denoiser) hf repo -- lets the studio label its
+    dropdowns with a real author/name instead of the short internal alias."""
+    files = STACKS.get(key)
+    return files[0][0] if files else key
+
+
 _LINGBOT_NODE_REPO = "https://github.com/RealRebelAI/ComfyUI_Rebels_LingBot"
 
 # comfyui model subdirs we can map hf paths onto by name

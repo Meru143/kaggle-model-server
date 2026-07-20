@@ -350,11 +350,19 @@ def _llm_running():
     return s is not None and s.poll() is None
 
 
+def _img_repo_label(key):
+    """the hf repo (author/name) that best identifies a diffusers entry --
+    transformer_from when a variant is defined by it (fal instant/fast), else
+    the base pipeline repo. keeps every entry's label unique and recognizable."""
+    e = IMAGE_MODELS[key]
+    return e.get("transformer_from") or e["hf_repo"]
+
+
 def _img_choices():
-    """image dropdown choices: comfy stacks (headless, reliable) first, then the
-    diffusers models (in-process, experimental on t4). value is the bare key."""
-    return ([(f"{k}  ·  comfy ✓ reliable", k) for k in comfy.image_stacks()] +
-            [(f"{k}  ·  diffusers (experimental)", k) for k in sorted(IMAGE_MODELS)])
+    """image dropdown: comfy stacks (headless, reliable) then diffusers models,
+    each LABELED by its hf repo (author/name); the value stays the short key."""
+    return ([(f"{comfy.stack_repo(k)}  ·  comfy ✓ reliable", k) for k in comfy.image_stacks()] +
+            [(f"{_img_repo_label(k)}  ·  diffusers (experimental)", k) for k in sorted(IMAGE_MODELS)])
 
 
 def _import_image_model(repo):
@@ -494,6 +502,11 @@ def _img_generate(prompt, steps, width, height):
 
 # ---- video ---------------------------------------------------------------
 
+def _vid_choices():
+    """video dropdown labeled by each stack's primary hf repo; value = short key"""
+    return [(comfy.stack_repo(k), k) for k in comfy.video_stacks()]
+
+
 def _import_video_stack(repo, quant):
     """add a best-effort single-repo stack to the video dropdown"""
     import gradio as gr
@@ -514,7 +527,7 @@ def _import_video_stack(repo, quant):
     lines.append("single-repo import: if the model card lists encoders/vae from OTHER "
                  "repos, this stack is incomplete -- those need a curated STACKS entry "
                  "in comfy_bootstrap.py (see ltx-2.3 / scail-2 for the shape).")
-    return gr.update(choices=comfy.video_stacks(), value=key), "\n".join(lines)
+    return gr.update(choices=_vid_choices(), value=key), "\n".join(lines)
 
 
 def _vid_start(key):
@@ -772,7 +785,7 @@ def _build():
                         'once and serves its full node gui at a public url — open that to drive the '
                         'workflow. wants most of the box\'s vram — stop the llm first if it ooms. '
                         '(image models moved to the image tab; they generate there with no gui.)</div>')
-            vid_stack = gr.Dropdown(choices=comfy.video_stacks(), value="ltx-2.3", label="video stack")
+            vid_stack = gr.Dropdown(choices=_vid_choices(), value="ltx-2.3", label="video stack")
             with gr.Row():
                 vid_start_btn = gr.Button("Install + start", variant="primary")
                 vid_stop_btn = gr.Button("Stop", variant="stop")
