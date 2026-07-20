@@ -701,9 +701,11 @@ def _build():
                         img_steps = gr.Number(label="steps — blank = default", value=None)
                         img_w = gr.Number(label="width — blank = default", value=None)
                         img_h = gr.Number(label="height — blank = default", value=None)
-                    gr.Markdown('<div class="km-note">quantized models default to 768² — '
-                                'attention at 1024² wants ~4GB the t4 doesn\'t have left. '
-                                'try 1024 only on z-image or via comfy.</div>')
+                    gr.Markdown('<div class="km-note">defaults to 768² for a safe first run, '
+                                'but models now split across both t4s — so 1024² (native) '
+                                'should fit: set width & height to 1024 to try it. drop back '
+                                'to 768 if a model still ooms (the single-card instant/fast '
+                                'ideograms are tightest).</div>')
                     img_go = gr.Button("Generate", variant="primary")
                     gr.Markdown('<div class="km-note">diffusers on a t4 is the experimental '
                                 'path — these models assume bf16, and fp16 overflow shows up as '
