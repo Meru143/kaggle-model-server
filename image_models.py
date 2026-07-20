@@ -74,11 +74,11 @@ IMAGE_MODELS = {
     # -diffusers repo (not ideogram-ai/ideogram-4-nf4 -- that layout is for
     # their own ideogram4 package). weights ship already-nf4, so we only
     # nf4 the 5.5GB text encoder here.
-    # heavy: real CFG loads TWO 5.2GB transformers (conditional +
-    # unconditional) + encoder ~= 16GB -> over one t4, so it relies on the
-    # split-across-both-t4s path in load(). if it's still tight, the
-    # ideogram-4-instant / -fast variants skip the uncond transformer (~8GB,
-    # one card), and the comfy "ideogram4" stack is the robust fallback.
+    # COMFY-ONLY on a t4: real CFG loads TWO 5.2GB transformers (conditional +
+    # unconditional) + encoder ~= 16GB, over one card, and diffusers' multi-gpu
+    # split is unreliable here (meta-tensor crashes). use the comfy "ideogram4"
+    # stack (it does multi-gpu properly), or the ideogram-4-instant / -fast
+    # variants which skip the uncond transformer (~8GB -> fits one t4).
     "ideogram-4": {
         "hf_repo": "ideogram-ai/ideogram-4-nf4-diffusers",
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
@@ -231,22 +231,15 @@ def load(key, gpu=None):
     # ("Some modules are dispatched on the CPU"). with encoders nf4'd too,
     # each quantized model's resident set fits a single t4 anyway. only
     # unquantized pipelines (z-image) spread across both gpus.
-    # spread across BOTH t4s (30GB) with max_memory forcing gpu-only placement.
-    # this fits the ~16GB ideogram-4 that overflows one card: bnb DOES shard
-    # across gpus -- the earlier "modules dispatched on cpu" failure was
-    # accelerate spilling to cpu (which bnb rejects) for want of a memory cap.
-    # max_memory with no "cpu" key keeps everything on the two gpus. leave
-    # ~1.5GB/card for the cuda context + activation buffers.
-    # transformer_from entries pass a pre-built transformer that pipeline
-    # device_map can't re-place, so they stay resident on one card (~8GB fits).
+    # placement, kept deliberately simple after diffusers' pipeline-level
+    # device_map split proved unreliable here (accelerate cpu-spill, then
+    # meta-tensor crashes at generation). two well-trodden single-card paths:
+    #   bnb-quantized -> resident (bnb can't cpu-offload); must fit one t4
+    #   unquantized   -> enable_model_cpu_offload (swaps components in as needed)
+    # models that genuinely exceed one t4 (ideogram-4's dual transformers ~16GB)
+    # have no reliable diffusers path on this hw -- use the comfy stack instead.
     has_bnb = bool(cfg.get("quantize")) or bool(cfg.get("transformer_from"))
-    n_gpu = torch.cuda.device_count()
-    multi = gpu is None and n_gpu >= 2 and not cfg.get("transformer_from")
-    if multi:
-        kwargs["device_map"] = "balanced"
-        kwargs["max_memory"] = {i: "13GiB" for i in range(n_gpu)}
-    place = ("split across both t4s" if multi else
-             "resident on one t4" if has_bnb else f"gpu {gpu or 0} + cpu offload")
+    place = "resident on one t4" if has_bnb else f"gpu {gpu or 0} + cpu offload"
     print(f"loading {cfg['hf_repo']} ({place})")
     pipe = DiffusionPipeline.from_pretrained(cfg["hf_repo"], **kwargs)
     set_progress("load")  # download done, now placing on gpu(s)
@@ -269,15 +262,10 @@ def load(key, gpu=None):
                 return (torch.zeros_like(hidden_states),)
 
         pipe.register_modules(unconditional_transformer=_ZeroUncond())
-    if multi:
-        pass  # device_map + max_memory placed everything across the gpus
-    elif has_bnb:
-        # bitsandbytes modules can't cpu-offload (nor spread via balanced) --
-        # both leave them stuck/OOM. these are sized ~10-12GB to sit fully
-        # resident on one t4, which is exactly what the cards do (pipe.to cuda)
-        pipe.to(f"cuda:{gpu or 0}")
+    if has_bnb:
+        pipe.to(f"cuda:{gpu or 0}")  # bnb can't offload; must fit one card
     else:
-        # unquantized on a single gpu: swap one component onto gpu at a time
+        # unquantized: swap one component onto gpu at a time (fits any size)
         pipe.enable_model_cpu_offload(gpu_id=gpu or 0)
     for helper in ("enable_attention_slicing", "enable_vae_tiling"):
         # t4 sdpa uses the math backend (no flash kernels on sm75), which

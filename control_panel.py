@@ -379,15 +379,15 @@ def _img_setup(key):
         # an llm on gpu 0 + balanced image placement = OOM (the planner can't
         # see the llm's footprint). 30GB total vram means one heavy job at a time.
         return _console("err", f"an LLM ({_state['model']}) is running on gpu 0",
-                        note="press Stop in the Launch tab first — image models spread "
-                             "across both t4s and need the whole box's vram, or they OOM")
+                        note="press Stop in the Launch tab first — image models load on "
+                             "gpu 0 and need most of its vram, or they OOM")
 
     def work():
         _img_state.update(busy=True, error=None, pipe=None, model=key)
         try:
             image_models.install(key)
-            # components spread across both t4s (nf4 weights can't cpu-offload,
-            # so denoiser + encoder overflow a single card)
+            # loads on one t4 (bnb resident / unquantized offload) -- diffusers
+            # multi-gpu split proved unreliable here; big models -> comfy stack
             _img_state["pipe"] = image_models.load(key)
         except Exception as e:
             _log_tb(f"image load {key}")
@@ -397,7 +397,7 @@ def _img_setup(key):
             set_progress("idle")
 
     threading.Thread(target=work, daemon=True).start()
-    return _console("busy", f"installing + loading {key} across both t4s — takes minutes",
+    return _console("busy", f"installing + loading {key} on gpu 0 — takes minutes",
                     note="press Refresh to follow progress")
 
 
@@ -701,11 +701,10 @@ def _build():
                         img_steps = gr.Number(label="steps — blank = default", value=None)
                         img_w = gr.Number(label="width — blank = default", value=None)
                         img_h = gr.Number(label="height — blank = default", value=None)
-                    gr.Markdown('<div class="km-note">defaults to 768² for a safe first run, '
-                                'but models now split across both t4s — so 1024² (native) '
-                                'should fit: set width & height to 1024 to try it. drop back '
-                                'to 768 if a model still ooms (the single-card instant/fast '
-                                'ideograms are tightest).</div>')
+                    gr.Markdown('<div class="km-note">runs on one t4, so keep to 768² (default) '
+                                '— 1024² fits only the smaller models here (try it, drop to 768 '
+                                'on OOM). anything that needs both cards (big diffusion models) '
+                                'belongs in the comfy video tab, which does multi-gpu properly.</div>')
                     img_go = gr.Button("Generate", variant="primary")
                     gr.Markdown('<div class="km-note">diffusers on a t4 is the experimental '
                                 'path — these models assume bf16, and fp16 overflow shows up as '
