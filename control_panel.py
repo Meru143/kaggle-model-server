@@ -342,6 +342,13 @@ def _chat(message, history, system_prompt=""):
 
 # ---- image ---------------------------------------------------------------
 
+def _llm_running():
+    """is a llama-server actually alive? (ground truth, not just UI state)"""
+    from harness import _current
+    s = _current.get("server")
+    return s is not None and s.poll() is None
+
+
 def _import_image_model(repo):
     """add any diffusers-format hf repo to the image dropdown"""
     import gradio as gr
@@ -368,6 +375,12 @@ def _import_image_model(repo):
 def _img_setup(key):
     if _img_state["busy"]:
         return _console("busy", "already installing — press Refresh for progress")
+    if _llm_running():
+        # an llm on gpu 0 + balanced image placement = OOM (the planner can't
+        # see the llm's footprint). 30GB total vram means one heavy job at a time.
+        return _console("err", f"an LLM ({_state['model']}) is running on gpu 0",
+                        note="press Stop in the Launch tab first — image models spread "
+                             "across both t4s and need the whole box's vram, or they OOM")
 
     def work():
         _img_state.update(busy=True, error=None, pipe=None, model=key)
@@ -467,6 +480,10 @@ def _import_video_stack(repo, quant):
 def _vid_start(key):
     if _vid_state["busy"]:
         return _console("busy", "already setting up — press Stop to cancel it first")
+    if _llm_running():
+        return _console("err", f"an LLM ({_state['model']}) is running on gpu 0",
+                        note="press Stop in the Launch tab first — comfyui wants most of "
+                             "the box's vram, and an llm sharing the gpu will OOM it")
 
     _vid_state["gen"] += 1
     my_gen = _vid_state["gen"]
