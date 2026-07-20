@@ -179,6 +179,39 @@ def _status():
     return _console("idle", "nothing running — pick a model and press Launch", gpu=True)
 
 
+# timer ticks: render while the phase is active + exactly one final render
+# when it clears (to show the result), then gr.skip() forever after -- so an
+# idle/running studio never re-renders on its own
+_tick_active = {"launch": False, "img": False, "vid": False}
+
+
+def _tick_launch():
+    import gradio as gr
+    busy = _state["busy"]
+    if busy or _tick_active["launch"]:
+        _tick_active["launch"] = busy
+        return _status()
+    return gr.skip()
+
+
+def _tick_img():
+    import gradio as gr
+    active = _img_state["busy"] or _img_state["gen_busy"]
+    if active or _tick_active["img"]:
+        _tick_active["img"] = active
+        return _img_refresh()
+    return gr.skip(), gr.skip()
+
+
+def _tick_vid():
+    import gradio as gr
+    busy = _vid_state["busy"]
+    if busy or _tick_active["vid"]:
+        _tick_active["vid"] = busy
+        return _vid_status()
+    return gr.skip()
+
+
 def _harvest():
     try:
         from harness import harvest_cache
@@ -677,14 +710,15 @@ def _build():
             vid_imp_btn.click(_import_video_stack, inputs=[vid_imp_repo, vid_imp_quant],
                               outputs=[vid_stack, vid_imp_status])
 
-        # auto-refresh the consoles ~every 2s so the download bar animates and
-        # finished results appear without manual Refresh -- no websockets, just
-        # a timer re-running the same status functions the buttons call
-        if hasattr(gr, "Timer"):
-            timer = gr.Timer(2)
-            timer.tick(_status, outputs=status)
-            timer.tick(_img_refresh, outputs=[img_status, img_out])
-            timer.tick(_vid_status, outputs=vid_status)
+        # auto-refresh ONLY while something is actively launching/loading, then
+        # go silent -- gr.skip() at rest means no re-render (no scroll jump, no
+        # flicker, no event-queue flooding while a model is just running/idle).
+        # the manual Refresh buttons still work anytime.
+        if hasattr(gr, "Timer") and hasattr(gr, "skip"):
+            timer = gr.Timer(3)
+            timer.tick(_tick_launch, outputs=status)
+            timer.tick(_tick_img, outputs=[img_status, img_out])
+            timer.tick(_tick_vid, outputs=vid_status)
     return demo
 
 
