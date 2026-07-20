@@ -171,6 +171,28 @@ STACKS = {
     ],
 }
 
+# which stacks render stills vs motion. comfy is the reliable both-t4 image
+# path on t4 (diffusers NaNs to black frames), but image is still a different
+# job from video -- the studio lists them in separate dropdowns so the video
+# picker isn't polluted with image models.
+IMAGE_STACKS = frozenset({
+    "z-image", "krea2-turbo", "krea2-raw", "krea2-hd",
+    "flux1", "flux2-klein-v3", "ideogram4",
+})
+assert IMAGE_STACKS <= STACKS.keys(), \
+    f"IMAGE_STACKS names not in STACKS: {IMAGE_STACKS - STACKS.keys()}"
+
+
+def video_stacks():
+    """stack keys that produce video (+ any imported packs, which default here)"""
+    return sorted(k for k in STACKS if k not in IMAGE_STACKS)
+
+
+def image_stacks():
+    """stack keys that produce stills -- the comfy image path"""
+    return sorted(k for k in STACKS if k in IMAGE_STACKS)
+
+
 _LINGBOT_NODE_REPO = "https://github.com/RealRebelAI/ComfyUI_Rebels_LingBot"
 
 # comfyui model subdirs we can map hf paths onto by name
@@ -342,7 +364,13 @@ def start(port=8188):
     log_fh = open(COMFY_LOG, "w")
     _current["log_fh"] = log_fh
     proc = subprocess.Popen(
-        [sys.executable, "main.py", "--listen", "0.0.0.0", "--port", str(port), "--force-fp16"],
+        # --enable-cors-header '*' swaps comfy's origin-only middleware -- which
+        # 403s any request whose Host/Origin don't match, i.e. EVERY request
+        # arriving through a cloudflared tunnel hostname -- for permissive cors,
+        # so the public url actually loads the gui instead of "403 not authorized".
+        # (the url is the only secret anyway; comfy has no auth either way.)
+        [sys.executable, "main.py", "--listen", "0.0.0.0", "--port", str(port),
+         "--force-fp16", "--enable-cors-header", "*"],
         cwd=COMFY_DIR, stdout=log_fh, stderr=subprocess.STDOUT,
     )
     _current["proc"] = proc

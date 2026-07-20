@@ -379,7 +379,7 @@ def _img_setup(key):
         # too big for one t4 in diffusers, and diffusers multi-gpu split is
         # broken here -- don't let it OOM; point at the path that works
         return _console("err", f"{key} needs both t4s — not doable via diffusers here",
-                        note=f"use the comfy '{key.split('-')[0]}4' stack in the Video tab "
+                        note=f"use the comfy '{key.split('-')[0]}4' image stack in the comfyui tab "
                              "(proper multi-gpu), or ideogram-4-instant / -fast in this tab")
     if _llm_running():
         # an llm on gpu 0 + a resident image model = OOM. 30GB total vram
@@ -480,7 +480,7 @@ def _import_video_stack(repo, quant):
     lines.append("single-repo import: if the model card lists encoders/vae from OTHER "
                  "repos, this stack is incomplete -- those need a curated STACKS entry "
                  "in comfy_bootstrap.py (see ltx-2.3 / scail-2 for the shape).")
-    return gr.update(choices=sorted(comfy.STACKS), value=key), "\n".join(lines)
+    return gr.update(choices=comfy.video_stacks(), value=key), "\n".join(lines)
 
 
 def _vid_start(key):
@@ -710,13 +710,13 @@ def _build():
                     gr.Markdown('<div class="km-note">runs on one t4, so keep to 768² (default) '
                                 '— 1024² fits only the smaller models here (try it, drop to 768 '
                                 'on OOM). anything that needs both cards (big diffusion models) '
-                                'belongs in the comfy video tab, which does multi-gpu properly.</div>')
+                                'belongs in the comfyui tab (image stack), which does multi-gpu properly.</div>')
                     img_go = gr.Button("Generate", variant="primary")
                     gr.Markdown('<div class="km-note">diffusers on a t4 is the experimental '
                                 'path — these models assume bf16, and fp16 overflow shows up as '
                                 'black frames. every model here has a proven comfyui fallback in '
-                                'the video tab (z-image, krea2-turbo/raw/hd, flux1, ideogram4). '
-                                'flux / ideogram need an HF_TOKEN + accepted license.</div>')
+                                'the comfyui tab → image stack (z-image, krea2-turbo/raw/hd, flux1, '
+                                'ideogram4). flux / ideogram need an HF_TOKEN + accepted license.</div>')
                 with gr.Column(scale=6):
                     img_status = gr.Markdown(_img_status(), elem_classes="km-console")
                     img_out = gr.Image(label="result")
@@ -734,17 +734,27 @@ def _build():
                               outputs=[img_model, img_imp_status])
             img_go.click(_img_generate, inputs=[img_prompt, img_steps, img_w, img_h],
                          outputs=[img_status, img_out])
-        with gr.Tab("video"):
-            vid_stack = gr.Dropdown(choices=sorted(comfy.STACKS), value="ltx-2.3",
-                                    label="stack")
+        with gr.Tab("video + image (comfyui)"):
+            gr.Markdown('<div class="km-note">comfyui is the reliable both-t4 path — it boots '
+                        'once and serves its whole node gui at a public url. video and image '
+                        'stacks are separate pickers below; only one runs at a time (it\'s the '
+                        'same comfy). wants most of the box\'s vram — stop the llm first if it ooms.</div>')
             with gr.Row():
-                vid_start_btn = gr.Button("Install + start", variant="primary")
+                vid_stack = gr.Dropdown(choices=comfy.video_stacks(), value="ltx-2.3",
+                                        label="video stack", scale=4)
+                vid_start_btn = gr.Button("Start video", variant="primary", scale=1)
+            with gr.Row():
+                cimg_stack = gr.Dropdown(choices=comfy.image_stacks(), value="z-image",
+                                         label="image stack — the dependable image path on t4",
+                                         scale=4)
+                cimg_start_btn = gr.Button("Start image", variant="primary", scale=1)
+            with gr.Row():
                 vid_stop_btn = gr.Button("Stop", variant="stop")
                 vid_refresh_btn = gr.Button("Refresh")
             vid_status = gr.Markdown(_vid_status(), elem_classes="km-console")
             gr.Markdown('<div class="km-note">the url serves comfyui\'s full node gui — any '
                         'workflow jsons shipped with the stack appear in its workflow browser. '
-                        'wants most of the box\'s vram: stop the llm first if it ooms.</div>')
+                        'open it in a new browser tab once the run light is green.</div>')
             with gr.Accordion("import a video pack from hugging face", open=False):
                 gr.Markdown("paste a comfyui-style repo (gguf pack or comfy-org repackage) — "
                             "files are mapped into comfyui's model dirs by their paths, one "
@@ -758,6 +768,7 @@ def _build():
                 vid_imp_status = gr.Textbox(label="result", lines=6)
 
             vid_start_btn.click(_vid_start, inputs=vid_stack, outputs=vid_status)
+            cimg_start_btn.click(_vid_start, inputs=cimg_stack, outputs=vid_status)
             vid_stop_btn.click(_vid_stop, outputs=vid_status)
             vid_refresh_btn.click(_vid_status, outputs=vid_status)
             vid_imp_btn.click(_import_video_stack, inputs=[vid_imp_repo, vid_imp_quant],
