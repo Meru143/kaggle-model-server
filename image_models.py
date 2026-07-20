@@ -230,8 +230,9 @@ def load(key, gpu=None):
     dual = gpu is None and torch.cuda.device_count() >= 2 and not has_bnb
     if dual:
         kwargs["device_map"] = "balanced"
-    print(f"loading {cfg['hf_repo']} "
-          f"({'balanced across both gpus' if dual else f'gpu {gpu or 0} + cpu offload'})")
+    place = ("balanced across both gpus" if dual else
+             "resident on one t4" if has_bnb else f"gpu {gpu or 0} + cpu offload")
+    print(f"loading {cfg['hf_repo']} ({place})")
     pipe = DiffusionPipeline.from_pretrained(cfg["hf_repo"], **kwargs)
     set_progress("load")  # download done, now placing on gpu(s)
     if cfg.get("zero_uncond"):
@@ -253,8 +254,15 @@ def load(key, gpu=None):
                 return (torch.zeros_like(hidden_states),)
 
         pipe.register_modules(unconditional_transformer=_ZeroUncond())
-    if not dual:
-        # one component on gpu at a time; fine for the smaller models only
+    if dual:
+        pass  # device_map="balanced" already placed everything
+    elif has_bnb:
+        # bitsandbytes modules can't cpu-offload (nor spread via balanced) --
+        # both leave them stuck/OOM. these are sized ~10-12GB to sit fully
+        # resident on one t4, which is exactly what the cards do (pipe.to cuda)
+        pipe.to(f"cuda:{gpu or 0}")
+    else:
+        # unquantized on a single gpu: swap one component onto gpu at a time
         pipe.enable_model_cpu_offload(gpu_id=gpu or 0)
     for helper in ("enable_attention_slicing", "enable_vae_tiling"):
         # t4 sdpa uses the math backend (no flash kernels on sm75), which
