@@ -37,10 +37,14 @@ from model_registry import MODELS
 
 _PORT = 8080  # panel always launches on harness's default port
 STUDIO_LOG = "/kaggle/tmp/studio.log"  # full tracebacks from every studio action
-_state = {"busy": False, "url": None, "error": None, "model": None, "api_key": None}
+# "gen" is a launch-generation counter: Stop (or a new launch) bumps it so an
+# in-flight background thread knows it's been cancelled and must not commit its
+# result -- lets Stop unlock the UI even while a launch is mid-flight
+_state = {"busy": False, "url": None, "error": None, "model": None,
+          "api_key": None, "gen": 0}
 _img_state = {"busy": False, "pipe": None, "error": None, "model": None,
               "gen_busy": False, "gen_error": None, "last_image": None}
-_vid_state = {"busy": False, "url": None, "error": None, "stack": None}
+_vid_state = {"busy": False, "url": None, "error": None, "stack": None, "gen": 0}
 
 
 def _log_tb(context):
@@ -130,7 +134,7 @@ def _on_model_change(model_key):
 
 def _launch(model_key, gguf_file, ctx, n_cpu_moe, api_key):
     if _state["busy"]:
-        return _console("busy", f"a launch is already running — press Refresh for progress")
+        return _console("busy", "a launch is already running — press Stop to cancel it first")
     overrides = {}
     if gguf_file:
         overrides["hf_file"] = gguf_file  # exact file picked from the quant list
@@ -141,27 +145,42 @@ def _launch(model_key, gguf_file, ctx, n_cpu_moe, api_key):
     if n_cpu_moe not in (None, "", 0):
         overrides["n_cpu_moe"] = int(n_cpu_moe)
 
+    _state["gen"] += 1
+    my_gen = _state["gen"]
+
     def work():
         _state.update(busy=True, url=None, error=None,
                       model=model_key, api_key=api_key or None)
         try:
-            _state["url"] = run(model_key, MODELS, api_key=api_key or None, **overrides)
+            url = run(model_key, MODELS, api_key=api_key or None, **overrides)
+            if _state["gen"] == my_gen:
+                _state["url"] = url
+            else:
+                stop()  # cancelled mid-flight -- tear down what this launch built
         except Exception as e:
-            _log_tb(f"launch {model_key}")
-            _state["error"] = f"{type(e).__name__}: {e}"
+            if _state["gen"] == my_gen:
+                _log_tb(f"launch {model_key}")
+                _state["error"] = f"{type(e).__name__}: {e}"
         finally:
-            _state["busy"] = False
-            set_progress("idle")
+            # only the current-generation launch owns the shared state; a
+            # cancelled one must not flip busy back on / clobber a newer launch
+            if _state["gen"] == my_gen:
+                _state["busy"] = False
+                set_progress("idle")
 
     # never block the click handler -- a cold launch takes minutes
     threading.Thread(target=work, daemon=True).start()
-    return _console("busy", f"launching {model_key} — build/download/load takes minutes",
-                    note="press Refresh to follow progress")
+    return _console("busy", f"launching {model_key}", prog=True, note="press Stop to cancel")
 
 
 def _stop():
+    # bump gen so any in-flight launch thread is invalidated, unlock the UI
+    # immediately, THEN kill procs (which also unblocks a stuck health-wait --
+    # proc death makes _wait_for_health return at once)
+    _state["gen"] += 1
+    _state.update(busy=False, url=None, error=None, model=None)
+    set_progress("idle")
     stop()
-    _state.update(url=None, error=None, model=None)
     return _console("idle", "stopped — nothing running")
 
 
@@ -448,24 +467,33 @@ def _import_video_stack(repo, quant):
 
 def _vid_start(key):
     if _vid_state["busy"]:
-        return _console("busy", "already setting up — press Refresh for progress")
+        return _console("busy", "already setting up — press Stop to cancel it first")
+
+    _vid_state["gen"] += 1
+    my_gen = _vid_state["gen"]
 
     def work():
         _vid_state.update(busy=True, url=None, error=None, stack=key)
         try:
             comfy.install()
             comfy.fetch_stack(key)
-            _vid_state["url"] = comfy.start()
+            url = comfy.start()
+            if _vid_state["gen"] == my_gen:
+                _vid_state["url"] = url
+            else:
+                comfy.stop()  # cancelled mid-flight
         except Exception as e:
-            _log_tb(f"video setup {key}")
-            _vid_state["error"] = f"{type(e).__name__}: {e}"
+            if _vid_state["gen"] == my_gen:
+                _log_tb(f"video setup {key}")
+                _vid_state["error"] = f"{type(e).__name__}: {e}"
         finally:
-            _vid_state["busy"] = False
-            set_progress("idle")
+            if _vid_state["gen"] == my_gen:
+                _vid_state["busy"] = False
+                set_progress("idle")
 
     threading.Thread(target=work, daemon=True).start()
     return _console("busy", f"installing comfyui + fetching {key} — 15-25GB first time",
-                    note="press Refresh to follow progress")
+                    prog=True, note="press Stop to cancel")
 
 
 def _vid_status():
@@ -482,8 +510,10 @@ def _vid_status():
 
 
 def _vid_stop():
+    _vid_state["gen"] += 1  # cancel any in-flight setup
+    _vid_state.update(busy=False, url=None, error=None, stack=None)
+    set_progress("idle")
     comfy.stop()
-    _vid_state.update(url=None, error=None, stack=None)
     return _console("idle", "stopped comfyui")
 
 
