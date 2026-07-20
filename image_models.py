@@ -74,11 +74,11 @@ IMAGE_MODELS = {
     # -diffusers repo (not ideogram-ai/ideogram-4-nf4 -- that layout is for
     # their own ideogram4 package). weights ship already-nf4, so we only
     # nf4 the 5.5GB text encoder here.
-    # WARNING: real CFG loads TWO 5.2GB transformers (conditional +
-    # unconditional) + encoder ~= 16GB, which does NOT fit one t4, and bnb
-    # can't offload or split across cards -> OOM. use ideogram-4-instant /
-    # -fast (they skip the uncond transformer -> ~8GB, fits) or the comfy
-    # "ideogram4" stack instead. this entry is kept for a bigger gpu.
+    # heavy: real CFG loads TWO 5.2GB transformers (conditional +
+    # unconditional) + encoder ~= 16GB -> over one t4, so it relies on the
+    # split-across-both-t4s path in load(). if it's still tight, the
+    # ideogram-4-instant / -fast variants skip the uncond transformer (~8GB,
+    # one card), and the comfy "ideogram4" stack is the robust fallback.
     "ideogram-4": {
         "hf_repo": "ideogram-ai/ideogram-4-nf4-diffusers",
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
@@ -231,11 +231,21 @@ def load(key, gpu=None):
     # ("Some modules are dispatched on the CPU"). with encoders nf4'd too,
     # each quantized model's resident set fits a single t4 anyway. only
     # unquantized pipelines (z-image) spread across both gpus.
+    # spread across BOTH t4s (30GB) with max_memory forcing gpu-only placement.
+    # this fits the ~16GB ideogram-4 that overflows one card: bnb DOES shard
+    # across gpus -- the earlier "modules dispatched on cpu" failure was
+    # accelerate spilling to cpu (which bnb rejects) for want of a memory cap.
+    # max_memory with no "cpu" key keeps everything on the two gpus. leave
+    # ~1.5GB/card for the cuda context + activation buffers.
+    # transformer_from entries pass a pre-built transformer that pipeline
+    # device_map can't re-place, so they stay resident on one card (~8GB fits).
     has_bnb = bool(cfg.get("quantize")) or bool(cfg.get("transformer_from"))
-    dual = gpu is None and torch.cuda.device_count() >= 2 and not has_bnb
-    if dual:
+    n_gpu = torch.cuda.device_count()
+    multi = gpu is None and n_gpu >= 2 and not cfg.get("transformer_from")
+    if multi:
         kwargs["device_map"] = "balanced"
-    place = ("balanced across both gpus" if dual else
+        kwargs["max_memory"] = {i: "13GiB" for i in range(n_gpu)}
+    place = ("split across both t4s" if multi else
              "resident on one t4" if has_bnb else f"gpu {gpu or 0} + cpu offload")
     print(f"loading {cfg['hf_repo']} ({place})")
     pipe = DiffusionPipeline.from_pretrained(cfg["hf_repo"], **kwargs)
@@ -259,8 +269,8 @@ def load(key, gpu=None):
                 return (torch.zeros_like(hidden_states),)
 
         pipe.register_modules(unconditional_transformer=_ZeroUncond())
-    if dual:
-        pass  # device_map="balanced" already placed everything
+    if multi:
+        pass  # device_map + max_memory placed everything across the gpus
     elif has_bnb:
         # bitsandbytes modules can't cpu-offload (nor spread via balanced) --
         # both leave them stuck/OOM. these are sized ~10-12GB to sit fully
