@@ -72,8 +72,13 @@ IMAGE_MODELS = {
     # GATED + NON-COMMERCIAL: needs HF_TOKEN (kaggle secret) and accepting
     # the license on the model page first. card's diffusers path uses the
     # -diffusers repo (not ideogram-ai/ideogram-4-nf4 -- that layout is for
-    # their own ideogram4 package). weights ship already-nf4, so no
-    # quantization pass here.
+    # their own ideogram4 package). weights ship already-nf4, so we only
+    # nf4 the 5.5GB text encoder here.
+    # WARNING: real CFG loads TWO 5.2GB transformers (conditional +
+    # unconditional) + encoder ~= 16GB, which does NOT fit one t4, and bnb
+    # can't offload or split across cards -> OOM. use ideogram-4-instant /
+    # -fast (they skip the uncond transformer -> ~8GB, fits) or the comfy
+    # "ideogram4" stack instead. this entry is kept for a bigger gpu.
     "ideogram-4": {
         "hf_repo": "ideogram-ai/ideogram-4-nf4-diffusers",
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
