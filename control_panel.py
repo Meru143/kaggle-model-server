@@ -43,7 +43,8 @@ STUDIO_LOG = "/kaggle/tmp/studio.log"  # full tracebacks from every studio actio
 _state = {"busy": False, "url": None, "error": None, "model": None,
           "api_key": None, "gen": 0}
 _img_state = {"busy": False, "pipe": None, "error": None, "model": None,
-              "gen_busy": False, "gen_error": None, "last_image": None}
+              "gen_busy": False, "gen_error": None, "last_image": None,
+              "backend": None}  # "comfy" (headless) or "diffusers" (in-process)
 _vid_state = {"busy": False, "url": None, "error": None, "stack": None, "gen": 0}
 
 
@@ -349,6 +350,13 @@ def _llm_running():
     return s is not None and s.poll() is None
 
 
+def _img_choices():
+    """image dropdown choices: comfy stacks (headless, reliable) first, then the
+    diffusers models (in-process, experimental on t4). value is the bare key."""
+    return ([(f"{k}  ·  comfy ✓ reliable", k) for k in comfy.image_stacks()] +
+            [(f"{k}  ·  diffusers (experimental)", k) for k in sorted(IMAGE_MODELS)])
+
+
 def _import_image_model(repo):
     """add any diffusers-format hf repo to the image dropdown"""
     import gradio as gr
@@ -369,27 +377,46 @@ def _import_image_model(repo):
            f"steps/guidance use the pipeline defaults -- check the model card and use "
            f"the steps box to override. to keep it, paste into image_models.py:\n"
            f'    "{key}": {json.dumps(entry)},')
-    return gr.update(choices=sorted(IMAGE_MODELS), value=key), msg
+    return gr.update(choices=_img_choices(), value=key), msg
 
 
 def _img_setup(key):
     if _img_state["busy"]:
         return _console("busy", "already installing — press Refresh for progress")
-    if IMAGE_MODELS.get(key, {}).get("comfy_only"):
-        # too big for one t4 in diffusers, and diffusers multi-gpu split is
-        # broken here -- don't let it OOM; point at the path that works
-        return _console("err", f"{key} needs both t4s — not doable via diffusers here",
-                        note=f"use the comfy '{key.split('-')[0]}4' image stack in the comfyui tab "
-                             "(proper multi-gpu), or ideogram-4-instant / -fast in this tab")
     if _llm_running():
-        # an llm on gpu 0 + a resident image model = OOM. 30GB total vram
-        # across two cards, but diffusers can't split -> one heavy job at a time.
+        # an llm on gpu 0 + a heavy image job = OOM. one heavy gpu job at a time.
         return _console("err", f"an LLM ({_state['model']}) is running on gpu 0",
-                        note="press Stop in the Launch tab first — image models load on "
-                             "gpu 0 and need most of its vram, or they OOM")
+                        note="press Stop in the Launch tab first — image models want most "
+                             "of the box's vram and will OOM sharing the gpu with an llm")
+
+    if key in comfy.IMAGE_STACKS:
+        # the reliable path: boot comfy HEADLESS and drive it over http from the
+        # Generate button -- no node gui needed. comfy runs one job at a time.
+        def work():
+            _img_state.update(busy=True, error=None, pipe=None, model=key, backend="comfy")
+            try:
+                comfy.install()
+                comfy.fetch_stack(key)
+                comfy.start()  # also mints a gui url for power users; not required here
+                _img_state["pipe"] = ("comfy", key)  # truthy sentinel = ready to generate
+            except Exception as e:
+                _log_tb(f"comfy image setup {key}")
+                _img_state["error"] = f"{type(e).__name__}: {e}"
+            finally:
+                _img_state["busy"] = False
+                set_progress("idle")
+        threading.Thread(target=work, daemon=True).start()
+        return _console("busy", f"installing comfy + fetching {key} — 5-15GB first time",
+                        prog=True, note="runs in the background; press Refresh to follow")
+
+    # diffusers path (experimental on t4)
+    if IMAGE_MODELS.get(key, {}).get("comfy_only"):
+        return _console("err", f"{key} needs both t4s — not doable via diffusers here",
+                        note="pick 'ideogram4 · comfy' from this dropdown instead — it runs "
+                             "headless across both cards")
 
     def work():
-        _img_state.update(busy=True, error=None, pipe=None, model=key)
+        _img_state.update(busy=True, error=None, pipe=None, model=key, backend="diffusers")
         try:
             image_models.install(key)
             # loads on one t4 (bnb resident / unquantized offload) -- diffusers
@@ -439,15 +466,22 @@ def _img_generate(prompt, steps, width, height):
     def work():
         _img_state.update(gen_busy=True, gen_error=None, last_image=None)
         try:
-            kwargs = {}
-            if steps:
-                kwargs["num_inference_steps"] = int(steps)
-            if width:
-                kwargs["width"] = int(width)
-            if height:
-                kwargs["height"] = int(height)
-            _img_state["last_image"] = image_models.generate(
-                _img_state["pipe"], prompt, **kwargs)
+            if _img_state.get("backend") == "comfy":
+                _img_state["last_image"] = comfy.generate_image(
+                    _img_state["model"], prompt,
+                    width=int(width) if width else None,
+                    height=int(height) if height else None,
+                    steps=int(steps) if steps else None)
+            else:
+                kwargs = {}
+                if steps:
+                    kwargs["num_inference_steps"] = int(steps)
+                if width:
+                    kwargs["width"] = int(width)
+                if height:
+                    kwargs["height"] = int(height)
+                _img_state["last_image"] = image_models.generate(
+                    _img_state["pipe"], prompt, **kwargs)
         except Exception:
             _img_state["gen_error"] = _log_tb("image generate")[-1500:]
         finally:
@@ -697,8 +731,9 @@ def _build():
         with gr.Tab("image"):
             with gr.Row():
                 with gr.Column(scale=5):
-                    img_model = gr.Dropdown(choices=sorted(IMAGE_MODELS),
-                                            value="z-image-turbo", label="image model")
+                    img_model = gr.Dropdown(
+                        choices=_img_choices(), value="z-image",
+                        label="image model — comfy ones run headless (reliable); diffusers in-process")
                     with gr.Row():
                         img_setup_btn = gr.Button("Install + load", variant="primary")
                         img_refresh_btn = gr.Button("Refresh")
@@ -707,16 +742,14 @@ def _build():
                         img_steps = gr.Number(label="steps — blank = default", value=None)
                         img_w = gr.Number(label="width — blank = default", value=None)
                         img_h = gr.Number(label="height — blank = default", value=None)
-                    gr.Markdown('<div class="km-note">runs on one t4, so keep to 768² (default) '
-                                '— 1024² fits only the smaller models here (try it, drop to 768 '
-                                'on OOM). anything that needs both cards (big diffusion models) '
-                                'belongs in the comfyui tab (image stack), which does multi-gpu properly.</div>')
+                    gr.Markdown('<div class="km-note">comfy models render at 1024² (blank = default) '
+                                'and run on both t4s via comfyui in the background — no node gui to open. '
+                                'diffusers models run in-process on one t4: keep those to 768².</div>')
                     img_go = gr.Button("Generate", variant="primary")
-                    gr.Markdown('<div class="km-note">diffusers on a t4 is the experimental '
-                                'path — these models assume bf16, and fp16 overflow shows up as '
-                                'black frames. every model here has a proven comfyui fallback in '
-                                'the comfyui tab → image stack (z-image, krea2-turbo/raw/hd, flux1, '
-                                'ideogram4). flux / ideogram need an HF_TOKEN + accepted license.</div>')
+                    gr.Markdown('<div class="km-note">the comfy models are the dependable path on t4 '
+                                '(comfy\'s fp16 works where diffusers black-frames). ideogram4 · comfy is '
+                                'experimental — its graph is newer and may still need the node gui. '
+                                'flux / ideogram need an HF_TOKEN + accepted license.</div>')
                 with gr.Column(scale=6):
                     img_status = gr.Markdown(_img_status(), elem_classes="km-console")
                     img_out = gr.Image(label="result")
@@ -734,21 +767,14 @@ def _build():
                               outputs=[img_model, img_imp_status])
             img_go.click(_img_generate, inputs=[img_prompt, img_steps, img_w, img_h],
                          outputs=[img_status, img_out])
-        with gr.Tab("video + image (comfyui)"):
-            gr.Markdown('<div class="km-note">comfyui is the reliable both-t4 path — it boots '
-                        'once and serves its whole node gui at a public url. video and image '
-                        'stacks are separate pickers below; only one runs at a time (it\'s the '
-                        'same comfy). wants most of the box\'s vram — stop the llm first if it ooms.</div>')
+        with gr.Tab("video"):
+            gr.Markdown('<div class="km-note">video runs through comfyui on both t4s. it boots '
+                        'once and serves its full node gui at a public url — open that to drive the '
+                        'workflow. wants most of the box\'s vram — stop the llm first if it ooms. '
+                        '(image models moved to the image tab; they generate there with no gui.)</div>')
+            vid_stack = gr.Dropdown(choices=comfy.video_stacks(), value="ltx-2.3", label="video stack")
             with gr.Row():
-                vid_stack = gr.Dropdown(choices=comfy.video_stacks(), value="ltx-2.3",
-                                        label="video stack", scale=4)
-                vid_start_btn = gr.Button("Start video", variant="primary", scale=1)
-            with gr.Row():
-                cimg_stack = gr.Dropdown(choices=comfy.image_stacks(), value="z-image",
-                                         label="image stack — the dependable image path on t4",
-                                         scale=4)
-                cimg_start_btn = gr.Button("Start image", variant="primary", scale=1)
-            with gr.Row():
+                vid_start_btn = gr.Button("Install + start", variant="primary")
                 vid_stop_btn = gr.Button("Stop", variant="stop")
                 vid_refresh_btn = gr.Button("Refresh")
             vid_status = gr.Markdown(_vid_status(), elem_classes="km-console")
@@ -768,7 +794,6 @@ def _build():
                 vid_imp_status = gr.Textbox(label="result", lines=6)
 
             vid_start_btn.click(_vid_start, inputs=vid_stack, outputs=vid_status)
-            cimg_start_btn.click(_vid_start, inputs=cimg_stack, outputs=vid_status)
             vid_stop_btn.click(_vid_stop, outputs=vid_status)
             vid_refresh_btn.click(_vid_status, outputs=vid_status)
             vid_imp_btn.click(_import_video_stack, inputs=[vid_imp_repo, vid_imp_quant],
@@ -799,7 +824,7 @@ def launch_panel(auth=None):
     # allowed_paths: gradio only serves files from cwd/tempdir by default,
     # and generated images live under /kaggle/tmp/outputs
     kwargs = dict(share=True, auth=auth, server_port=7860, show_error=True,
-                  allowed_paths=[image_models.OUT_DIR])
+                  allowed_paths=[image_models.OUT_DIR, f"{comfy.COMFY_DIR}/output"])
     if _launch_takes_style(gr):
         kwargs.update(_style(gr))
     demo.launch(**kwargs)

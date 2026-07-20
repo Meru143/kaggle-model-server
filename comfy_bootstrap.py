@@ -16,6 +16,7 @@ logs: /kaggle/tmp/comfyui.log -- `!tail -50 /kaggle/tmp/comfyui.log`
 
 import json
 import os
+import random
 import shutil
 import signal
 import subprocess
@@ -431,6 +432,162 @@ def queue_workflow(workflow, timeout=3600):
     raise TimeoutError(f"workflow still running after {timeout}s -- check {COMFY_LOG}")
 
 
+# ---- headless image generation ------------------------------------------
+# flat /prompt (api-format) graphs per image stack so the studio can do
+# prompt->png WITHOUT anyone opening the node gui. every node type + sampler
+# recipe below is transcribed from the official comfy templates
+# (github.com/Comfy-Org/workflow_templates) -- not invented -- and the loaders
+# point at exactly the files fetch_stack() downloads. this is the reliable
+# image path on t4: comfy's fp16 works where the diffusers pipelines black-frame.
+#
+# families: 'ksampler' (z-image / krea2 / flux1 -- classic KSampler), 'flux2'
+# (SamplerCustomAdvanced + Flux2Scheduler), 'ideogram4' (dual-transformer;
+# EXPERIMENTAL -- its DualModelGuider/Ideogram4Scheduler nodes are newer and
+# unverified on this build, so it may still need the gui).
+_IMAGE_RECIPE = {
+    "z-image": dict(family="ksampler", unet=("gguf", "z-image-turbo-Q8_0.gguf"),
+                    clip=("qwen_3_4b_fp8_mixed.safetensors", "lumina2"),
+                    vae="ae.safetensors", latent="EmptySD3LatentImage",
+                    shift=3.0, steps=8, cfg=1.0, sampler="res_multistep", scheduler="simple"),
+    "krea2-turbo": dict(family="ksampler", unet=("gguf", "krea2_turbo-Q4_K_M.gguf"),
+                    clip=("qwen3vl_4b_fp8_scaled.safetensors", "krea2"),
+                    vae="qwen_image_vae.safetensors", latent="EmptyLatentImage",
+                    steps=8, cfg=1.0, sampler="euler", scheduler="simple"),
+    "krea2-hd": dict(family="ksampler", unet=("gguf", "Krea2-Turbo-HD-V1-Q4_K_S.gguf"),
+                    clip=("qwen3vl_4b_fp8_scaled.safetensors", "krea2"),
+                    vae="Krea2-HD-vae.safetensors", latent="EmptyLatentImage",
+                    steps=8, cfg=1.0, sampler="euler", scheduler="simple"),
+    "krea2-raw": dict(family="ksampler", unet=("safetensors", "krea2_raw_fp8_scaled.safetensors"),
+                    clip=("qwen3vl_4b_fp8_scaled.safetensors", "krea2"),
+                    vae="qwen_image_vae.safetensors", latent="EmptyLatentImage",
+                    steps=40, cfg=4.0, sampler="euler", scheduler="simple"),
+    "flux1": dict(family="ksampler", unet=("gguf", "flux1-dev-Q8_0.gguf"),
+                    clip=("clip_l.safetensors", "t5xxl_fp8_e4m3fn.safetensors", "flux"),
+                    vae="ae.safetensors", latent="EmptySD3LatentImage",
+                    steps=20, cfg=1.0, sampler="euler", scheduler="simple"),
+    "flux2-klein-v3": dict(family="flux2", unet=("gguf", "Flux2-Klein-9B-True-V3-Q4_K.gguf"),
+                    clip=("qwen_3_8b_fp8mixed.safetensors", "flux2"),
+                    vae="flux2-vae.safetensors", steps=20, cfg=5.0),
+    "ideogram4": dict(family="ideogram4", unet=("safetensors", "ideogram4_fp8_scaled.safetensors"),
+                    unet_uncond="ideogram4_unconditional_fp8_scaled.safetensors",
+                    clip=("qwen3vl_8b_fp8_scaled.safetensors", "ideogram4"),
+                    vae="flux2-vae.safetensors", steps=25, cfg=7.0, mu=0.5, std=1.75),
+}
+assert set(_IMAGE_RECIPE) == set(IMAGE_STACKS), \
+    f"image recipe / IMAGE_STACKS mismatch: {set(_IMAGE_RECIPE) ^ set(IMAGE_STACKS)}"
+
+
+def _loader_node(spec):
+    """model loader: gguf -> UnetLoaderGGUF (ComfyUI-GGUF), else UNETLoader.
+    UNETLoader reads models/unet AND models/diffusion_models, so fp8 safetensors
+    placed in diffusion_models/ load fine."""
+    kind, fn = spec
+    if kind == "gguf":
+        return {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": fn}}
+    return {"class_type": "UNETLoader", "inputs": {"unet_name": fn, "weight_dtype": "default"}}
+
+
+def _clip_node(clip):
+    if len(clip) == 3:  # dual (flux1): clip_l + t5
+        return {"class_type": "DualCLIPLoader",
+                "inputs": {"clip_name1": clip[0], "clip_name2": clip[1], "type": clip[2]}}
+    return {"class_type": "CLIPLoader", "inputs": {"clip_name": clip[0], "type": clip[1]}}
+
+
+def _round16(px, default):
+    px = int(px) if px else default
+    return max(256, (px // 16) * 16)  # 16-multiple keeps every latent packer happy
+
+
+def build_image_workflow(stack, prompt, width=None, height=None, steps=None, seed=None):
+    """flat api-format graph for one image stack, prompt/size/steps/seed injected"""
+    r = _IMAGE_RECIPE[stack]
+    w, h = _round16(width, 1024), _round16(height, 1024)
+    steps = int(steps) if steps else r["steps"]
+    seed = random.randint(0, 2**63 - 1) if seed is None else int(seed)
+    fam = r["family"]
+
+    if fam == "ksampler":
+        g = {"1": _loader_node(r["unet"]), "2": _clip_node(r["clip"]),
+             "3": {"class_type": "VAELoader", "inputs": {"vae_name": r["vae"]}}}
+        model_ref = ["1", 0]
+        if r.get("shift") is not None:  # z-image needs AuraFlow model-sampling
+            g["4"] = {"class_type": "ModelSamplingAuraFlow",
+                      "inputs": {"shift": r["shift"], "model": ["1", 0]}}
+            model_ref = ["4", 0]
+        g["5"] = {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["2", 0]}}
+        g["6"] = {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["5", 0]}}
+        g["7"] = {"class_type": r["latent"],
+                  "inputs": {"width": w, "height": h, "batch_size": 1}}
+        g["8"] = {"class_type": "KSampler",
+                  "inputs": {"seed": seed, "steps": steps, "cfg": r["cfg"],
+                             "sampler_name": r["sampler"], "scheduler": r["scheduler"],
+                             "denoise": 1.0, "model": model_ref,
+                             "positive": ["5", 0], "negative": ["6", 0], "latent_image": ["7", 0]}}
+        g["9"] = {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["3", 0]}}
+        g["10"] = {"class_type": "SaveImage", "inputs": {"filename_prefix": "km", "images": ["9", 0]}}
+        return g
+
+    if fam == "flux2":  # SamplerCustomAdvanced pipeline, empty-prompt negative
+        g = {"1": _loader_node(r["unet"]), "2": _clip_node(r["clip"]),
+             "3": {"class_type": "VAELoader", "inputs": {"vae_name": r["vae"]}},
+             "5": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["2", 0]}},
+             "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["2", 0]}},
+             "7": {"class_type": "CFGGuider",
+                   "inputs": {"cfg": r["cfg"], "model": ["1", 0], "positive": ["5", 0], "negative": ["6", 0]}},
+             "8": {"class_type": "Flux2Scheduler", "inputs": {"steps": steps, "width": w, "height": h}},
+             "9": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+             "10": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+             "11": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}},
+             "12": {"class_type": "SamplerCustomAdvanced",
+                    "inputs": {"noise": ["10", 0], "guider": ["7", 0], "sampler": ["9", 0],
+                               "sigmas": ["8", 0], "latent_image": ["11", 0]}},
+             "13": {"class_type": "VAEDecode", "inputs": {"samples": ["12", 0], "vae": ["3", 0]}},
+             "14": {"class_type": "SaveImage", "inputs": {"filename_prefix": "km", "images": ["13", 0]}}}
+        return g
+
+    if fam == "ideogram4":  # dual transformer (main + unconditional), best-effort
+        g = {"1": _loader_node(r["unet"]),
+             "1u": {"class_type": "UNETLoader",
+                    "inputs": {"unet_name": r["unet_uncond"], "weight_dtype": "default"}},
+             "2": _clip_node(r["clip"]),
+             "3": {"class_type": "VAELoader", "inputs": {"vae_name": r["vae"]}},
+             "5": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["2", 0]}},
+             "6": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["5", 0]}},
+             "7": {"class_type": "DualModelGuider",
+                   "inputs": {"cfg": r["cfg"], "model": ["1", 0], "positive": ["5", 0],
+                              "model_negative": ["1u", 0], "negative": ["6", 0]}},
+             "8": {"class_type": "Ideogram4Scheduler",
+                   "inputs": {"steps": steps, "width": w, "height": h, "mu": r["mu"], "std": r["std"]}},
+             "9": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+             "10": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+             "11": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}},
+             "12": {"class_type": "SamplerCustomAdvanced",
+                    "inputs": {"noise": ["10", 0], "guider": ["7", 0], "sampler": ["9", 0],
+                               "sigmas": ["8", 0], "latent_image": ["11", 0]}},
+             "13": {"class_type": "VAEDecode", "inputs": {"samples": ["12", 0], "vae": ["3", 0]}},
+             "14": {"class_type": "SaveImage", "inputs": {"filename_prefix": "km", "images": ["13", 0]}}}
+        return g
+
+    raise ValueError(f"unknown image family {fam!r} for stack {stack!r}")
+
+
+def generate_image(stack, prompt, width=None, height=None, steps=None, seed=None, timeout=1800):
+    """headless prompt->png: builds the stack's workflow, queues it on the
+    already-running comfy server, returns the saved png path. call start()
+    (via the studio's Install+load) once for the stack before generating."""
+    if stack not in _IMAGE_RECIPE:
+        raise ValueError(f"{stack!r} has no headless image recipe (video stack?)")
+    if not (_current["proc"] and _current["proc"].poll() is None):
+        raise RuntimeError("comfy isn't running -- press Install + load for this image stack first")
+    wf = build_image_workflow(stack, prompt, width, height, steps, seed)
+    paths = queue_workflow(wf, timeout=timeout)
+    imgs = [p for p in paths if p.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))]
+    if not imgs:
+        raise RuntimeError(f"workflow produced no image -- check {COMFY_LOG}")
+    return imgs[0]
+
+
 def stop():
     """terminates the comfyui process (and its tunnel) cleanly, if up"""
     for key in ("proc", "tunnel"):
@@ -451,3 +608,19 @@ def stop():
         _current[key] = None
     _current["port"] = None
     print("stopped comfyui")
+
+
+if __name__ == "__main__":
+    # graph-integrity self-check: every input that references another node
+    # ([node_id, slot]) must point at a node that exists in the same graph.
+    # catches a mistyped node id in build_image_workflow before it 400s on comfy.
+    for _stack in _IMAGE_RECIPE:
+        _g = build_image_workflow(_stack, "a test prompt", width=1000, height=800, steps=7)
+        for _nid, _node in _g.items():
+            assert isinstance(_node.get("class_type"), str) and _node["class_type"], _nid
+            for _k, _v in _node["inputs"].items():
+                if isinstance(_v, list) and len(_v) == 2 and isinstance(_v[0], str):
+                    assert _v[0] in _g, f"{_stack}: node {_nid}.{_k} -> missing {_v[0]}"
+        assert any(n["class_type"] == "SaveImage" for n in _g.values()), _stack
+        assert _round16(1000, 1024) == 992 and _round16(None, 768) == 768
+    print(f"ok: {len(_IMAGE_RECIPE)} image workflows build, all refs resolve")
