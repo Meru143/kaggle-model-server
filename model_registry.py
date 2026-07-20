@@ -49,6 +49,8 @@ MODELS = {
         "tensor_split": None,
         "n_cpu_moe": None,
         "gpu_devices": [0],
+        "extra_args": ["--jinja"],
+        "sampling": {"temperature": 0.7, "top_p": 0.95, "top_k": 20},  # card
         "est_vram_gb": 8.7,  # 7.2 weights + kv/buffers at 8k ctx
     },
     # q4_k_m is ~7.3GB and comfortable on one t4. the 12GB figure you had
@@ -65,6 +67,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0],
         "extra_args": ["--jinja"],
+        "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 64},  # gemma defaults
         "est_vram_gb": 9,
     },
     # dual-t4 hot-swap tier -- doesn't fit on one t4, needs both. displaces
@@ -100,6 +103,8 @@ MODELS = {
         "tensor_split": None,
         "n_cpu_moe": None,
         "gpu_devices": [0],
+        "extra_args": ["--jinja"],
+        "sampling": {"temperature": 0.7, "top_p": 0.95, "top_k": 20},  # card
         "est_vram_gb": 5,  # 3.8 weights + 4-bit kv on a hybrid-attn backbone
     },
     # claude-mythos-5 distill on qwen3.5-9b. the advertised 1M context is NOT
@@ -114,6 +119,7 @@ MODELS = {
         "tensor_split": None,
         "n_cpu_moe": None,
         "gpu_devices": [0],
+        "extra_args": ["--jinja"],
         "sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "repeat_penalty": 1.05},
         "est_vram_gb": 7,
     },
@@ -127,6 +133,7 @@ MODELS = {
         "tensor_split": None,
         "n_cpu_moe": None,
         "gpu_devices": [0],
+        "extra_args": ["--jinja"],
         "sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "repeat_penalty": 1.05},
         "est_vram_gb": 9,
     },
@@ -142,7 +149,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0],
         "extra_args": ["--jinja"],
-        "sampling": {"temperature": 1.0, "repeat_penalty": 1.1},
+        "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 64, "repeat_penalty": 1.1},
         "est_vram_gb": 9,
     },
     # text-to-3D-mesh llm (llama-3.1-8b base): chat it a shape description,
@@ -155,6 +162,7 @@ MODELS = {
         "tensor_split": None,
         "n_cpu_moe": None,
         "gpu_devices": [0],
+        "extra_args": ["--jinja"],
         "est_vram_gb": 6.5,
     },
     # official dense 4B sibling of agents-a1 (released 2026-07-14): strong
@@ -183,6 +191,7 @@ MODELS = {
         "tensor_split": None,
         "n_cpu_moe": None,
         "gpu_devices": [0],
+        "extra_args": ["--jinja"],
         "sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "repeat_penalty": 1.05},
         "est_vram_gb": 7.5,
     },
@@ -199,6 +208,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0],
         "extra_args": ["--jinja"],
+        "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 64},  # gemma defaults
         "est_vram_gb": 9,
     },
     # abliterated gemma-4 coder finetune (mradermacher static quants, note the
@@ -212,6 +222,7 @@ MODELS = {
         "n_cpu_moe": None,
         "gpu_devices": [0],
         "extra_args": ["--jinja"],
+        "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 64},  # gemma defaults
         "est_vram_gb": 9,
     },
 
