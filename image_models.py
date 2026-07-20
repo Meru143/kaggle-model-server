@@ -122,6 +122,18 @@ IMAGE_MODELS = {
 }
 
 
+def _repo_total(repo):
+    """sum of a repo's weight files in bytes (for the studio download bar)"""
+    from huggingface_hub import HfApi
+    try:
+        info = HfApi().model_info(repo, files_metadata=True,
+                                  token=os.environ.get("HF_TOKEN"))
+        return sum((s.size or 0) for s in info.siblings
+                   if s.rfilename.endswith((".safetensors", ".bin", ".gguf")))
+    except Exception:
+        return 0
+
+
 def detect_image_entry(repo):
     """registry-style entry for any diffusers-format repo (model_index.json),
     so unlisted models can be imported without editing this file:
@@ -173,6 +185,15 @@ def load(key, gpu=None):
     from diffusers import DiffusionPipeline
 
     cfg = IMAGE_MODELS[key]
+    # studio progress: the checkpoint download is the long pole. watch the hf
+    # cache grow against the repo's total size (best-effort; no-op off-studio)
+    try:
+        from harness import set_progress
+        set_progress("download", total=_repo_total(cfg["hf_repo"]),
+                     watch=os.environ.get("HF_HOME"))
+    except Exception:
+        def set_progress(*a, **k):
+            pass
     kwargs = {"torch_dtype": torch.float16}  # cards say bf16; t4 is sm75 -> fp16
     if cfg.get("gated"):
         kwargs["token"] = os.environ.get("HF_TOKEN")
@@ -223,6 +244,7 @@ def load(key, gpu=None):
     print(f"loading {cfg['hf_repo']} "
           f"({'balanced across both gpus' if dual else f'gpu {gpu or 0} + cpu offload'})")
     pipe = DiffusionPipeline.from_pretrained(cfg["hf_repo"], **kwargs)
+    set_progress("load")  # download done, now placing on gpu(s)
     if not dual:
         # one component on gpu at a time; fine for the smaller models only
         pipe.enable_model_cpu_offload(gpu_id=gpu or 0)

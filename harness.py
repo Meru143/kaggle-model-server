@@ -101,6 +101,82 @@ def _repo_slug(repo_url):
     return re.sub(r"[^a-zA-Z0-9]+", "-", tail).strip("-").lower()
 
 
+# ---- launch progress (studio bar + eta) ---------------------------------
+# one shared mechanism for all three stacks. the download phase gets a real
+# bar+eta from bytes-on-disk vs the known total; build/load/pip are honestly
+# indeterminate (no clean signal) so they show a phase label + elapsed, never
+# a fake percentage.
+_progress = {"phase": "idle", "total": 0.0, "watch": None, "base": 0.0, "t0": 0.0}
+
+_PHASE_LABEL = {
+    "build": "building llama.cpp from source — one-time this session (~15 min)",
+    "load": "loading weights into vram",
+    "install": "pip installing dependencies",
+    "tunnel": "opening the tunnel",
+}
+
+
+def _dirsize(path):
+    if not path or not os.path.isdir(path):
+        return 0
+    total = 0
+    for root, dirs, files in os.walk(path):
+        if "llama.cpp-" in root:  # build trees don't grow during downloads -- skip
+            dirs[:] = []
+            continue
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def set_progress(phase, total=0.0, watch=None):
+    """studio progress hook. phase in {build,download,load,install,tunnel,idle}.
+    download phases pass total (bytes) + watch (a dir that grows as bytes land)
+    to enable a real bar; progress is measured as bytes-appeared-since-now, so
+    pre-existing files in watch don't count."""
+    _progress.update(phase=phase, total=float(total or 0), watch=watch,
+                     base=float(_dirsize(watch)) if watch else 0.0, t0=time.time())
+
+
+def _remote_size(cfg):
+    try:
+        info = HfApi().model_info(cfg["hf_repo"], files_metadata=True)
+        return next((s.size for s in info.siblings
+                     if s.rfilename == cfg["hf_file"]), 0) or 0
+    except Exception:
+        return 0
+
+
+def _fmt_eta(s):
+    s = int(max(s, 0))
+    return f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
+
+
+def progress_line():
+    """human-readable progress for the current phase; '' when idle."""
+    ph = _progress["phase"]
+    if ph == "idle":
+        return ""
+    elapsed = time.time() - _progress["t0"]
+    if ph == "download" and _progress["total"] and _progress["watch"]:
+        done = max(_dirsize(_progress["watch"]) - _progress["base"], 0)
+        total = _progress["total"]
+        if done > 50e6:  # a real download is in flight
+            frac = min(done / total, 0.999)
+            rate = done / elapsed if elapsed > 0 else 0
+            eta = (total - done) / rate if rate > 0 else 0
+            filled = int(frac * 24)
+            bar = "█" * filled + "░" * (24 - filled)
+            return (f"downloading  {bar}  {frac * 100:.0f}%  ·  "
+                    f"{done / 1e9:.1f}/{total / 1e9:.1f} GB  ·  "
+                    f"{rate / 1e6:.0f} MB/s  ·  eta {_fmt_eta(eta)}")
+        return f"preparing download… ({_fmt_eta(elapsed)})"
+    return f"{_PHASE_LABEL.get(ph, ph)} … ({_fmt_eta(elapsed)})"
+
+
 # ---- binary bootstrap ---------------------------------------------------
 
 def ensure_llamacpp_binary(repo_url=None):
@@ -132,6 +208,7 @@ def ensure_llamacpp_binary(repo_url=None):
         return built_bin
 
     print(f"no cached binary for {slug}, building from source (one-time cost this session)")
+    set_progress("build")
     # skip the clone if a previous (possibly failed) attempt left one behind --
     # git refuses to clone into a non-empty dir, which used to wedge retries
     if not os.path.exists(build_dir):
@@ -234,6 +311,7 @@ def ensure_weights(model_cfg):
         return cached
 
     print(f"fetching {model_cfg['hf_file']} from {model_cfg['hf_repo']}")
+    set_progress("download", total=_remote_size(model_cfg), watch=WORK_DIR)
     return hf_hub_download(
         repo_id=model_cfg["hf_repo"],
         filename=model_cfg["hf_file"],
@@ -458,6 +536,7 @@ def start_server(model_key, model_cfg, port=8080, api_key=None, health_timeout=6
     log_fh = open(SERVER_LOG, "w")
     _current["log_fhs"].append(log_fh)
     print(f"starting {model_key}: {' '.join(cmd)}")
+    set_progress("load")
     proc = subprocess.Popen(cmd, env=env, stdout=log_fh, stderr=subprocess.STDOUT)
     _current["server"] = proc
     _current["port"] = port
@@ -488,6 +567,7 @@ def start_tunnel(port=8080):
     -> tunnels -> create, point its public hostname at http://localhost:8080,
     save the token as the CF_TUNNEL_TOKEN secret (and the hostname as
     CF_TUNNEL_HOSTNAME so the printed url is the real one)."""
+    set_progress("tunnel")
     binary = ensure_cloudflared()
     token = os.environ.get("CF_TUNNEL_TOKEN")
     cmd = _tunnel_cmd(binary, port, token)

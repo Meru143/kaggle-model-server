@@ -30,7 +30,8 @@ import requests
 
 import comfy_bootstrap as comfy
 import image_models
-from harness import SERVER_LOG, _tail, detect_entry, list_quants, run, stop
+from harness import (SERVER_LOG, _tail, detect_entry, list_quants,
+                     progress_line, run, set_progress, stop)
 from image_models import IMAGE_MODELS
 from model_registry import MODELS
 
@@ -71,10 +72,13 @@ def _gpu_note():
         return None
 
 
-def _console(led, head, log_path=None, link=None, note=None, err=None, gpu=False):
-    """led + one-line status + optional link/note/vram/log tail, as safe html"""
+def _console(led, head, log_path=None, link=None, note=None, err=None, gpu=False,
+             prog=False):
+    """led + one-line status + optional progress/link/note/vram/log tail, as safe html"""
     parts = [f'<span class="km-led {led}">&#9679;</span> '
              f'<span class="km-head">{html.escape(head)}</span>']
+    if prog and (line := progress_line()):
+        parts.append(f'<div class="km-prog">{html.escape(line)}</div>')
     if link:
         safe = html.escape(link, quote=True)
         parts.append(f'<div class="km-note"><a href="{safe}" target="_blank">{safe}</a></div>')
@@ -147,6 +151,7 @@ def _launch(model_key, gguf_file, ctx, n_cpu_moe, api_key):
             _state["error"] = f"{type(e).__name__}: {e}"
         finally:
             _state["busy"] = False
+            set_progress("idle")
 
     # never block the click handler -- a cold launch takes minutes
     threading.Thread(target=work, daemon=True).start()
@@ -162,8 +167,8 @@ def _stop():
 
 def _status():
     if _state["busy"]:
-        return _console("busy", f"launching {_state['model']} — build/download/load takes minutes",
-                        log_path=SERVER_LOG, gpu=True)
+        return _console("busy", f"launching {_state['model']}",
+                        prog=True, log_path=SERVER_LOG, gpu=True)
     if _state["error"]:
         return _console("err", "launch failed", err=_state["error"], log_path=SERVER_LOG)
     if _state["url"]:
@@ -318,6 +323,7 @@ def _img_setup(key):
             _img_state["error"] = f"{type(e).__name__}: {e}"
         finally:
             _img_state["busy"] = False
+            set_progress("idle")
 
     threading.Thread(target=work, daemon=True).start()
     return _console("busy", f"installing + loading {key} across both t4s — takes minutes",
@@ -326,7 +332,7 @@ def _img_setup(key):
 
 def _img_status():
     if _img_state["busy"]:
-        return _console("busy", f"loading {_img_state['model']} — pip install + checkpoint download")
+        return _console("busy", f"loading {_img_state['model']}", prog=True)
     if _img_state["error"]:
         return _console("err", "image model failed to load", err=_img_state["error"],
                         note=f"full traceback: {STUDIO_LOG}")
@@ -415,6 +421,7 @@ def _vid_start(key):
             _vid_state["error"] = f"{type(e).__name__}: {e}"
         finally:
             _vid_state["busy"] = False
+            set_progress("idle")
 
     threading.Thread(target=work, daemon=True).start()
     return _console("busy", f"installing comfyui + fetching {key} — 15-25GB first time",
@@ -423,8 +430,8 @@ def _vid_start(key):
 
 def _vid_status():
     if _vid_state["busy"]:
-        return _console("busy", f"setting up {_vid_state['stack']} — big downloads, be patient",
-                        log_path=comfy.COMFY_LOG)
+        return _console("busy", f"setting up {_vid_state['stack']}",
+                        prog=True, log_path=comfy.COMFY_LOG)
     if _vid_state["error"]:
         return _console("err", "comfyui setup failed", err=_vid_state["error"],
                         log_path=comfy.COMFY_LOG)
@@ -467,6 +474,8 @@ _CSS = f"""
                    border-top: 1px solid {_C['border']}; color: {_C['sub']};
                    font-size: .7rem; line-height: 1.5; max-height: 300px; overflow: auto; }}
 .km-console pre.km-err {{ color: {_C['err']}; border-top: 0; padding-top: 4px; margin-top: 6px; }}
+.km-console .km-prog {{ color: {_C['run']}; font-size: .78rem; margin-top: 8px;
+                        white-space: pre-wrap; font-variant-numeric: tabular-nums; }}
 button {{ transition: background 150ms ease-out, border-color 150ms ease-out; }}
 button:focus-visible, input:focus-visible {{ outline: 2px solid {_C['run']} !important; outline-offset: 1px; }}
 @media (prefers-reduced-motion: reduce) {{
@@ -660,6 +669,15 @@ def _build():
             vid_refresh_btn.click(_vid_status, outputs=vid_status)
             vid_imp_btn.click(_import_video_stack, inputs=[vid_imp_repo, vid_imp_quant],
                               outputs=[vid_stack, vid_imp_status])
+
+        # auto-refresh the consoles ~every 2s so the download bar animates and
+        # finished results appear without manual Refresh -- no websockets, just
+        # a timer re-running the same status functions the buttons call
+        if hasattr(gr, "Timer"):
+            timer = gr.Timer(2)
+            timer.tick(_status, outputs=status)
+            timer.tick(_img_refresh, outputs=[img_status, img_out])
+            timer.tick(_vid_status, outputs=vid_status)
     return demo
 
 

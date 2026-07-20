@@ -30,7 +30,7 @@ if os.path.isdir("/kaggle"):
 
 from huggingface_hub import hf_hub_download, list_repo_files
 
-from harness import WORK_DIR, _tail, start_tunnel
+from harness import WORK_DIR, _tail, set_progress, start_tunnel
 from harness import _current as _harness_state
 
 COMFY_DIR = f"{WORK_DIR}/ComfyUI"
@@ -242,9 +242,25 @@ def _pip_requirements(pkg_dir):
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", req], check=True)
 
 
+def _stack_total(files):
+    """sum bytes of a stack's specific files, for the studio download bar"""
+    from huggingface_hub import HfApi
+    api, sizes, total = HfApi(), {}, 0
+    for repo, fn, _ in files:
+        if repo not in sizes:
+            try:
+                sizes[repo] = {s.rfilename: (s.size or 0)
+                               for s in api.model_info(repo, files_metadata=True).siblings}
+            except Exception:
+                sizes[repo] = {}
+        total += sizes[repo].get(fn, 0)
+    return total
+
+
 def install():
     """clone comfyui + the gguf/kjnodes packs, pip install each requirements.txt.
     idempotent -- re-running skips anything already present."""
+    set_progress("install")
     for url, dst in [
         ("https://github.com/comfyanonymous/ComfyUI", COMFY_DIR),
         ("https://github.com/city96/ComfyUI-GGUF", f"{COMFY_DIR}/custom_nodes/ComfyUI-GGUF"),
@@ -297,6 +313,7 @@ def fetch_stack(key, unet=None):
     """downloads a named model set and symlinks it into comfyui's model dirs.
     unet= overrides just the unet gguf filename (e.g. a different quant)."""
     files = STACKS[key]
+    set_progress("download", total=_stack_total(files), watch=WORK_DIR)
     if key.startswith("lingbot"):
         # every lingbot variant loads through the rebels node pack
         node_dir = f"{COMFY_DIR}/custom_nodes/ComfyUI_Rebels_LingBot"
@@ -321,6 +338,7 @@ def start(port=8188):
     http api, then exposes it through cloudflared and returns the public url --
     the full node gui is served at that url."""
     stop()
+    set_progress("load")
     log_fh = open(COMFY_LOG, "w")
     _current["log_fh"] = log_fh
     proc = subprocess.Popen(
