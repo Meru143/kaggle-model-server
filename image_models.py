@@ -216,21 +216,10 @@ def load(key, gpu=None):
             quantization_config=BitsAndBytesConfig(
                 load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16),
             token=os.environ.get("HF_TOKEN"))
-    if cfg.get("zero_uncond"):
-        # fal card's zero-parameter stand-in for diffusers' mandatory cfg
-        # branch; with guidance_scale=1.0 it is never actually called
-        class _ZeroUncond(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.register_buffer("_dtype_anchor",
-                                     torch.empty(0, dtype=torch.float16),
-                                     persistent=False)
-
-            @property
-            def dtype(self):
-                return self._dtype_anchor.dtype
-
-        kwargs["unconditional_transformer"] = _ZeroUncond()
+        # skip the base's 5GB unconditional transformer; a zero stand-in is
+        # registered AFTER load (from_pretrained type-checks component kwargs
+        # and rejects a plain Module -- register_modules does not)
+        kwargs["unconditional_transformer"] = None
     # bnb-quantized entries are pinned to one gpu: accelerate's "balanced"
     # planner sizes the UNQUANTIZED checkpoint, decides it can't fit, and
     # spills quantized modules to cpu -- which bitsandbytes forbids
@@ -245,6 +234,25 @@ def load(key, gpu=None):
           f"({'balanced across both gpus' if dual else f'gpu {gpu or 0} + cpu offload'})")
     pipe = DiffusionPipeline.from_pretrained(cfg["hf_repo"], **kwargs)
     set_progress("load")  # download done, now placing on gpu(s)
+    if cfg.get("zero_uncond"):
+        # fal's zero-parameter cfg-branch stand-in (guidance_scale=1.0 means
+        # it's the no-op branch). register_modules bypasses the ModelMixin
+        # type check that from_pretrained's component kwarg enforces.
+        class _ZeroUncond(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("_dtype_anchor",
+                                     torch.empty(0, dtype=torch.float16),
+                                     persistent=False)
+
+            @property
+            def dtype(self):
+                return self._dtype_anchor.dtype
+
+            def forward(self, *, hidden_states, **kwargs):
+                return (torch.zeros_like(hidden_states),)
+
+        pipe.register_modules(unconditional_transformer=_ZeroUncond())
     if not dual:
         # one component on gpu at a time; fine for the smaller models only
         pipe.enable_model_cpu_offload(gpu_id=gpu or 0)
