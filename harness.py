@@ -696,7 +696,8 @@ def run(model_key, registry, *, port=8080, api_key=None, health_timeout=600, **o
     """the one call the notebook actually makes: swap to model_key, expose it,
     return the url. any registry field (ctx, ngl, tensor_split, n_cpu_moe,
     gpu_devices, extra_args, hf_file, quant, ...) can be overridden per-call:
-        run("qwen3.6-35b-a3b-hotswap", MODELS, quant="Q3_K_M", ctx=16384)
+        run("bartowski/Qwen_Qwen3.6-35B-A3B-GGUF", MODELS, quant="Q3_K_M", ctx=16384)
+    model_key is the full hf repo id (author/name) -- same as the registry key.
     quant= resolves to a real filename via resolve_quant, so switching quants
     never requires knowing the repo's naming scheme."""
     cfg = {**registry[model_key], **overrides}

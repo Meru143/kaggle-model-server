@@ -27,7 +27,7 @@ kaggle 2x t4 + 30GB ram budget cheat sheet:
 
 philosophy: entries are DEFAULTS, not law. every field here can be overridden
 per-call via run() kwargs (see harness.run), including quant switching by name:
-    run("qwen3.6-35b-a3b-hotswap", MODELS, quant="Q3_K_M", ctx=16384)
+    run("bartowski/Qwen_Qwen3.6-35B-A3B-GGUF", MODELS, quant="Q3_K_M", ctx=16384)
 list_quants(key, MODELS) shows what a repo offers. a proven override earns a
 promotion back into its entry; edit this file only to change defaults.
 """
@@ -40,7 +40,7 @@ MODELS = {
     # cuda numbers are from h100, so treat the first t4 boot as a smoke test.
     # optional extras in the same repo: mmproj (vision, 0.63GB) and the
     # dspark drafter (~2GB, lossless speculative-decoding speedup on cuda).
-    "bonsai-27b-resident": {
+    "prism-ml/Ternary-Bonsai-27B-gguf": {
         "hf_repo": "prism-ml/Ternary-Bonsai-27B-gguf",
         "hf_file": "Ternary-Bonsai-27B-Q2_0.gguf",
         "llama_cpp_repo": "https://github.com/PrismML-Eng/llama.cpp",
@@ -58,7 +58,7 @@ MODELS = {
     # at 8k ctx once kv + buffers land on top; if you want q8, give it
     # tensor_split "1,1" and both gpus instead. --jinja applies the gemma 4
     # chat template shipped in the gguf.
-    "gemma4-12b": {
+    "bartowski/gemma-4-12B-it-GGUF": {
         "hf_repo": "bartowski/gemma-4-12B-it-GGUF",
         "hf_file": "gemma-4-12B-it-Q4_K_M.gguf",
         "ctx": 8192,
@@ -75,7 +75,7 @@ MODELS = {
     # across 2x15GB. alternative if you'd rather keep gpu 1 free: it's an
     # A3B MoE, so one t4 + n_cpu_moe (experts parked in the 30GB system ram)
     # also works, just slower.
-    "qwen3.6-35b-a3b-hotswap": {
+    "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF": {
         "hf_repo": "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF",
         "hf_file": "Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf",
         "ctx": 8192,
@@ -94,7 +94,7 @@ MODELS = {
     # ~90% of fp16 quality (card) vs the ternary's 95%. same prismml fork
     # requirement (custom Q1_0_g128 kernels), same t4 smoke-test caveat.
     # optional in-repo extras: mmproj (vision) + dspark drafter.
-    "bonsai-27b-1bit": {
+    "prism-ml/Bonsai-27B-gguf": {
         "hf_repo": "prism-ml/Bonsai-27B-gguf",
         "hf_file": "Bonsai-27B-Q1_0.gguf",
         "llama_cpp_repo": "https://github.com/PrismML-Eng/llama.cpp",
@@ -111,7 +111,7 @@ MODELS = {
     # feasible in 15GB vram -- keep 8k. card sampling: temp 0.6, top-p 0.95,
     # top-k 20, repeat-penalty 1.05. same repo also ships -MTP- twins with the
     # speculative head (quant="MTP-Q4_K_M") and an mmproj for vision.
-    "qwythos-9b-1m": {
+    "empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF": {
         "hf_repo": "empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF",
         "hf_file": "Qwythos-9B-Claude-Mythos-5-1M-Q4_K_M.gguf",
         "ctx": 8192,
@@ -125,7 +125,7 @@ MODELS = {
     },
     # qwythos v2: looping trained out, greedy decoding stays coherent (card).
     # q6_k because a 9b leaves lots of single-t4 headroom; MTP twins in-repo.
-    "qwythos-9b-v2": {
+    "empero-ai/Qwythos-9B-v2-GGUF": {
         "hf_repo": "empero-ai/Qwythos-9B-v2-GGUF",
         "hf_file": "Qwythos-9B-v2-Q6_K.gguf",
         "ctx": 8192,
@@ -140,7 +140,7 @@ MODELS = {
     # coding/terminal-agentic gemma-4 finetune (~3.5x base on tau2 telecom).
     # author: Q4_K_M is the sweet spot, no Q2 shipped; set rep_pen ~1.1 if
     # output loops. --jinja is required for gemma 4's native tool format.
-    "gemma4-12b-agentic": {
+    "yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF": {
         "hf_repo": "yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF",
         "hf_file": "gemma4-v2-Q4_K_M.gguf",
         "ctx": 8192,
@@ -154,7 +154,7 @@ MODELS = {
     },
     # text-to-3D-mesh llm (llama-3.1-8b base): chat it a shape description,
     # it emits OBJ vertices/faces as plain text.
-    "llama-mesh": {
+    "bartowski/LLaMA-Mesh-GGUF": {
         "hf_repo": "bartowski/LLaMA-Mesh-GGUF",
         "hf_file": "LLaMA-Mesh-Q4_K_M.gguf",
         "ctx": 8192,
@@ -168,7 +168,7 @@ MODELS = {
     # official dense 4B sibling of agents-a1 (released 2026-07-14): strong
     # small agentic model. same card sampling as the 35B: temp 0.85,
     # top_p 0.95, top_k 20, presence_penalty 1.1. tiny -> huge ctx headroom.
-    "agents-a1-4b": {
+    "InternScience/Agents-A1-4B-Q4_K_M-GGUF": {
         "hf_repo": "InternScience/Agents-A1-4B-Q4_K_M-GGUF",
         "hf_file": "Agents-A1-4B-Q4_K_M.gguf",
         "ctx": 8192,
@@ -183,7 +183,7 @@ MODELS = {
     # abliterated twin of qwythos-9b-1m (huihui). same 1M-ctx caveat: default
     # 8192, the 1M is not feasible here. card runs MTP flags on these files
     # (--spec-type draft-mtp, n-max 2) -- add via extra_args override if wanted.
-    "qwythos-9b-1m-abl": {
+    "huihui-ai/Huihui-Qwythos-9B-Claude-Mythos-5-1M-abliterated-GGUF": {
         "hf_repo": "huihui-ai/Huihui-Qwythos-9B-Claude-Mythos-5-1M-abliterated-GGUF",
         "hf_file": "Huihui-Qwythos-9B-Claude-Mythos-5-1M-abliterated-Q4_K.gguf",
         "ctx": 8192,
@@ -199,7 +199,7 @@ MODELS = {
     # twin of gemma4-12b in spirit -- qat q4_0-trained weights requantized.
     # card's MTP recipe needs a second drafter file (mtp-ggml-model-bf16.gguf
     # + --spec-draft-model), which the single-file harness doesn't fetch.
-    "gemma4-12b-qat-abl": {
+    "huihui-ai/Huihui-gemma-4-12B-it-qat-q4_0-unquantized-abliterated-GGUF": {
         "hf_repo": "huihui-ai/Huihui-gemma-4-12B-it-qat-q4_0-unquantized-abliterated-GGUF",
         "hf_file": "Huihui-gemma-4-12B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf",
         "ctx": 8192,
@@ -213,7 +213,7 @@ MODELS = {
     },
     # abliterated gemma-4 coder finetune (mradermacher static quants, note the
     # dot-separated filenames). base entry in spirit: gemma4-12b-agentic.
-    "gemma4-12b-coder-abl": {
+    "mradermacher/Huihui-gemma-4-12B-coder-fable5-composer2.5-v1-abliterated-GGUF": {
         "hf_repo": "mradermacher/Huihui-gemma-4-12B-coder-fable5-composer2.5-v1-abliterated-GGUF",
         "hf_file": "Huihui-gemma-4-12B-coder-fable5-composer2.5-v1-abliterated.Q4_K_M.gguf",
         "ctx": 8192,
@@ -231,7 +231,7 @@ MODELS = {
     # reasoning finetune of qwen3.6-27b that answers in ~half the tokens.
     # card: Q4_K_M + MTP self-speculation is their small-footprint pick;
     # their recommended draft length is 4 (accepts ~3.75 tokens/verify).
-    "thinkingcap-27b": {
+    "bottlecapai/ThinkingCap-Qwen3.6-27B-GGUF": {
         "hf_repo": "bottlecapai/ThinkingCap-Qwen3.6-27B-GGUF",
         "hf_file": "ThinkingCap-Qwen3.6-27B-Q4_K_M.gguf",
         "ctx": 8192,
@@ -247,7 +247,7 @@ MODELS = {
     # gives a big decode speedup with no separate draft model. UD-Q4_K_XL is
     # the card's own serving pick. card says n-max 2 (not 6) for this repo,
     # and notes --mmproj is not yet supported together with MTP.
-    "qwen3.6-27b-mtp": {
+    "unsloth/Qwen3.6-27B-MTP-GGUF": {
         "hf_repo": "unsloth/Qwen3.6-27B-MTP-GGUF",
         "hf_file": "Qwen3.6-27B-UD-Q4_K_XL.gguf",
         "ctx": 8192,
@@ -261,7 +261,7 @@ MODELS = {
     },
     # deepreinforce's swe/terminal coding distill (qwen3.6-35b-a3b base).
     # card serves 262k ctx on big iron; 8k here, raise per-call if needed.
-    "ornith-35b": {
+    "deepreinforce-ai/Ornith-1.0-35B-GGUF": {
         "hf_repo": "deepreinforce-ai/Ornith-1.0-35B-GGUF",
         "hf_file": "ornith-1.0-35b-Q4_K_M.gguf",
         "ctx": 8192,
@@ -277,7 +277,7 @@ MODELS = {
     # never download the bf16 InternScience/Agents-A1 repo (70GB). card
     # sampling: temp 0.85, top_p 0.95, top_k 20, presence_penalty 1.1.
     # optional Agents-A1-mmproj.gguf in-repo adds vision.
-    "agents-a1": {
+    "InternScience/Agents-A1-Q4_K_M-GGUF": {
         "hf_repo": "InternScience/Agents-A1-Q4_K_M-GGUF",
         "hf_file": "Agents-A1-Q4_K_M.gguf",
         "ctx": 8192,
@@ -297,7 +297,7 @@ MODELS = {
     # card wants >=128k ctx to preserve thinking mode -- that kv budget does
     # not exist on 2x t4, so 8-16k it is: thinking mode is degraded, prefer
     # non-thinking (card: temp 0.7, top_p 0.8, top_k 20, presence 1.5).
-    "qwen3.6-35b-hauhau-abl": {
+    "HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive": {
         "hf_repo": "HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive",
         "hf_file": "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf",
         "ctx": 8192,
@@ -311,7 +311,7 @@ MODELS = {
     },
     # abliterated twin of agents-a1 (huihui). same card sampling as the base
     # entry: temp 0.85, top_p 0.95, top_k 20, presence_penalty 1.1.
-    "agents-a1-abl": {
+    "huihui-ai/Huihui-Agents-A1-abliterated-GGUF": {
         "hf_repo": "huihui-ai/Huihui-Agents-A1-abliterated-GGUF",
         "hf_file": "Agents-A1-abliterated-Q4_K.gguf",
         "ctx": 8192,
@@ -325,7 +325,7 @@ MODELS = {
     },
     # abliterated twin of qwen3.6-27b-mtp (huihui), MTP drafter kept.
     # card invocation: -fa on + draft-mtp with n-max 6 for this repo.
-    "qwen3.6-27b-mtp-abl": {
+    "huihui-ai/Huihui-Qwen3.6-27B-abliterated-MTP-GGUF": {
         "hf_repo": "huihui-ai/Huihui-Qwen3.6-27B-abliterated-MTP-GGUF",
         "hf_file": "Huihui-Qwen3.6-27B-abliterated-ggml-model-Q4_K.gguf",
         "ctx": 8192,
@@ -345,7 +345,7 @@ MODELS = {
     # fallback: quant="Q2_K" (13.3GB) squeezes onto ONE t4:
     #     run(key, MODELS, quant="Q2_K", tensor_split=None, gpu_devices=[0])
     # Q6_K (29.2GB) is over the dual-t4 budget -- skip it.
-    "qwen3.6-35b-claude-abl": {
+    "huihui-ai/Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated-MTP-GGUF": {
         "hf_repo": "huihui-ai/Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated-MTP-GGUF",
         "hf_file": "Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated-ggml-model-Q4_K.gguf",
         "ctx": 8192,

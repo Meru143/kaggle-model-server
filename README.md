@@ -21,14 +21,14 @@ Image and video from code (no studio): `from image_models import install, load, 
 
 ## Changing settings (no registry edits needed)
 
-Registry entries are **defaults**. Override anything per-call:
+Model keys are the **full Hugging Face repo id** (`author/name`) — the same string you'd see on the model page, so there's no short alias to decode. Registry entries are **defaults**; override anything per-call:
 
 ```python
-run("qwen3.6-35b-a3b-hotswap", MODELS,
+run("bartowski/Qwen_Qwen3.6-35B-A3B-GGUF", MODELS,
     quant="Q3_K_M",   # switch quant BY NAME -- resolved to the real filename for you
     ctx=16384,        # any registry field works: ngl, tensor_split, n_cpu_moe, extra_args...
     api_key="secret")
-list_quants("qwen3.6-35b-a3b-hotswap", MODELS)  # every gguf in the repo, with sizes
+list_quants("bartowski/Qwen_Qwen3.6-35B-A3B-GGUF", MODELS)  # every gguf in the repo, with sizes
 ```
 
 Unknown quant names fail fast **listing what the repo actually offers**, and a size check warns before you download something that won't fit (12GB single-T4 / 26GB dual). Edit `model_registry.py` only to change a *default*; a proven override deserves promotion into the registry.

@@ -257,8 +257,7 @@ def _import_model(repo):
     except Exception as e:
         return (gr.update(), gr.update(), gr.update(), gr.update(),
                 f"import failed: {type(e).__name__}: {e}")
-    key = re.sub(r"[^a-z0-9.]+", "-", repo.split("/")[-1].lower()).strip("-")
-    key = re.sub(r"-gguf$", "", key)
+    key = repo  # keys are the full hf repo id (author/name), like the registry
     MODELS[key] = entry
     quant_update, ctx_update, moe_update = _on_model_change(key)
     gpus = "both t4s" if entry["tensor_split"] else "one t4"
