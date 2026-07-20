@@ -81,6 +81,7 @@ IMAGE_MODELS = {
     # variants which skip the uncond transformer (~8GB -> fits one t4).
     "ideogram-4": {
         "hf_repo": "ideogram-ai/ideogram-4-nf4-diffusers",
+        "comfy_only": True,  # 16GB > one t4; studio routes this to the comfy stack
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
         # transformers ship pre-nf4; quantizing the 5.5GB encoder brings the
         # resident set under one t4

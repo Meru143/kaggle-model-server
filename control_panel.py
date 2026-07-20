@@ -375,9 +375,15 @@ def _import_image_model(repo):
 def _img_setup(key):
     if _img_state["busy"]:
         return _console("busy", "already installing — press Refresh for progress")
+    if IMAGE_MODELS.get(key, {}).get("comfy_only"):
+        # too big for one t4 in diffusers, and diffusers multi-gpu split is
+        # broken here -- don't let it OOM; point at the path that works
+        return _console("err", f"{key} needs both t4s — not doable via diffusers here",
+                        note=f"use the comfy '{key.split('-')[0]}4' stack in the Video tab "
+                             "(proper multi-gpu), or ideogram-4-instant / -fast in this tab")
     if _llm_running():
-        # an llm on gpu 0 + balanced image placement = OOM (the planner can't
-        # see the llm's footprint). 30GB total vram means one heavy job at a time.
+        # an llm on gpu 0 + a resident image model = OOM. 30GB total vram
+        # across two cards, but diffusers can't split -> one heavy job at a time.
         return _console("err", f"an LLM ({_state['model']}) is running on gpu 0",
                         note="press Stop in the Launch tab first — image models load on "
                              "gpu 0 and need most of its vram, or they OOM")
