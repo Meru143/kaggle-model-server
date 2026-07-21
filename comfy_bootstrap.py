@@ -295,6 +295,11 @@ def install():
         ("https://github.com/comfyanonymous/ComfyUI", COMFY_DIR),
         ("https://github.com/city96/ComfyUI-GGUF", f"{COMFY_DIR}/custom_nodes/ComfyUI-GGUF"),
         ("https://github.com/kijai/ComfyUI-KJNodes", f"{COMFY_DIR}/custom_nodes/ComfyUI-KJNodes"),
+        # lets a workflow pin each model to a specific card. comfy is otherwise
+        # single-gpu: on t4x2 the text encoder alone is 5-9GB, so parking it on
+        # gpu1 is what stops the big stacks spilling to cpu ram (= minutes/step)
+        ("https://github.com/pollockjj/ComfyUI-MultiGPU",
+         f"{COMFY_DIR}/custom_nodes/ComfyUI-MultiGPU"),
     ]:
         _clone(url, dst)
         _pip_requirements(dst)
@@ -484,21 +489,68 @@ assert set(_IMAGE_RECIPE) == set(IMAGE_STACKS), \
     f"image recipe / IMAGE_STACKS mismatch: {set(_IMAGE_RECIPE) ^ set(IMAGE_STACKS)}"
 
 
-def _loader_node(spec):
+_NODE_CACHE = {}
+
+
+def _has_node(cls):
+    """does the RUNNING comfy actually expose this node class? asked once via
+    /object_info. lets the builder use the ComfyUI-MultiGPU loaders when the
+    pack is there and silently fall back to core nodes when it isn't -- a
+    missing class_type would otherwise 400 the whole prompt."""
+    if "nodes" not in _NODE_CACHE:
+        try:
+            r = requests.get(f"http://127.0.0.1:{_current['port'] or 8188}/object_info",
+                             timeout=10)
+            r.raise_for_status()
+            _NODE_CACHE["nodes"] = set(r.json())
+        except Exception:
+            _NODE_CACHE["nodes"] = set()  # comfy down / old build -> core only
+    return cls in _NODE_CACHE["nodes"]
+
+
+def _second_gpu():
+    """'cuda:1' only when the box really has two cards -- otherwise placement is
+    pointless and pinning a nonexistent device would fail the load"""
+    try:
+        import torch
+        return "cuda:1" if torch.cuda.device_count() > 1 else None
+    except Exception:
+        return None
+
+
+def _loader_node(spec, device=None):
     """model loader: gguf -> UnetLoaderGGUF (ComfyUI-GGUF), else UNETLoader.
     UNETLoader reads models/unet AND models/diffusion_models, so fp8 safetensors
-    placed in diffusion_models/ load fine."""
+    placed in diffusion_models/ load fine. device= pins it to one card."""
     kind, fn = spec
     if kind == "gguf":
-        return {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": fn}}
-    return {"class_type": "UNETLoader", "inputs": {"unet_name": fn, "weight_dtype": "default"}}
+        base, mg = {"unet_name": fn}, "UnetLoaderGGUFMultiGPU"
+        core = "UnetLoaderGGUF"
+    else:
+        base, mg = {"unet_name": fn, "weight_dtype": "default"}, "UNETLoaderMultiGPU"
+        core = "UNETLoader"
+    if device and _has_node(mg):
+        return {"class_type": mg, "inputs": {**base, "device": device}}
+    return {"class_type": core, "inputs": base}
 
 
-def _clip_node(clip):
+def _clip_node(clip, device=None):
     if len(clip) == 3:  # dual (flux1): clip_l + t5
-        return {"class_type": "DualCLIPLoader",
-                "inputs": {"clip_name1": clip[0], "clip_name2": clip[1], "type": clip[2]}}
-    return {"class_type": "CLIPLoader", "inputs": {"clip_name": clip[0], "type": clip[1]}}
+        base = {"clip_name1": clip[0], "clip_name2": clip[1], "type": clip[2]}
+        core, mg = "DualCLIPLoader", "DualCLIPLoaderMultiGPU"
+    else:
+        base = {"clip_name": clip[0], "type": clip[1]}
+        core, mg = "CLIPLoader", "CLIPLoaderMultiGPU"
+    if device and _has_node(mg):
+        return {"class_type": mg, "inputs": {**base, "device": device}}
+    return {"class_type": core, "inputs": base}
+
+
+def _vae_node(vae, device=None):
+    if device and _has_node("VAELoaderMultiGPU"):
+        return {"class_type": "VAELoaderMultiGPU",
+                "inputs": {"vae_name": vae, "device": device}}
+    return {"class_type": "VAELoader", "inputs": {"vae_name": vae}}
 
 
 def _round16(px, default):
@@ -513,10 +565,16 @@ def build_image_workflow(stack, prompt, width=None, height=None, steps=None, see
     steps = int(steps) if steps else r["steps"]
     seed = random.randint(0, 2**63 - 1) if seed is None else int(seed)
     fam = r["family"]
+    # the whole speed story on t4x2: the text encoder (5-9GB) goes on the idle
+    # second card so the denoiser gets gpu0 to itself. without this comfy is
+    # single-gpu, the big stacks overflow 15GB and stream weights from cpu ram
+    # every step. falls back to plain single-card loaders on a 1-gpu box.
+    enc_dev = _second_gpu()
+    main_dev = "cuda:0" if enc_dev else None
 
     if fam == "ksampler":
-        g = {"1": _loader_node(r["unet"]), "2": _clip_node(r["clip"]),
-             "3": {"class_type": "VAELoader", "inputs": {"vae_name": r["vae"]}}}
+        g = {"1": _loader_node(r["unet"], main_dev), "2": _clip_node(r["clip"], enc_dev),
+             "3": _vae_node(r["vae"], main_dev)}
         model_ref = ["1", 0]
         if r.get("shift") is not None:  # z-image needs AuraFlow model-sampling
             g["4"] = {"class_type": "ModelSamplingAuraFlow",
@@ -536,8 +594,8 @@ def build_image_workflow(stack, prompt, width=None, height=None, steps=None, see
         return g
 
     if fam == "flux2":  # SamplerCustomAdvanced pipeline, empty-prompt negative
-        g = {"1": _loader_node(r["unet"]), "2": _clip_node(r["clip"]),
-             "3": {"class_type": "VAELoader", "inputs": {"vae_name": r["vae"]}},
+        g = {"1": _loader_node(r["unet"], main_dev), "2": _clip_node(r["clip"], enc_dev),
+             "3": _vae_node(r["vae"], main_dev),
              "5": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["2", 0]}},
              "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["2", 0]}},
              "7": {"class_type": "CFGGuider",
@@ -554,11 +612,13 @@ def build_image_workflow(stack, prompt, width=None, height=None, steps=None, see
         return g
 
     if fam == "ideogram4":  # dual transformer (main + unconditional), best-effort
-        g = {"1": _loader_node(r["unet"]),
-             "1u": {"class_type": "UNETLoader",
-                    "inputs": {"unet_name": r["unet_uncond"], "weight_dtype": "default"}},
-             "2": _clip_node(r["clip"]),
-             "3": {"class_type": "VAELoader", "inputs": {"vae_name": r["vae"]}},
+        # BOTH transformers on gpu0 (~11GB together) and the 8b encoder alone on
+        # gpu1 (~9GB): that's the split that fits, and it's why this one went
+        # from 20 min of cpu-swapping to something usable.
+        g = {"1": _loader_node(r["unet"], main_dev),
+             "1u": _loader_node(("safetensors", r["unet_uncond"]), main_dev),
+             "2": _clip_node(r["clip"], enc_dev),
+             "3": _vae_node(r["vae"], main_dev),
              "5": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["2", 0]}},
              "6": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["5", 0]}},
              "7": {"class_type": "DualModelGuider",
