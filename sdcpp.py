@@ -147,6 +147,22 @@ def _total(key, quants=None):
     return total
 
 
+def list_quants(key, role="diffusion"):
+    """[(path, gb)] of ggufs available for one role, smallest first -- so the
+    studio can offer a quant picker for sd.cpp models too. scoped to that
+    role's own folder, so the cond model isn't offered the uncond weights."""
+    cfg = SD_MODELS.get(key) or {}
+    if role not in cfg:
+        return []
+    repo, path = cfg[role]
+    folder = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+    from huggingface_hub import HfApi
+    rows = [(s.rfilename, (s.size or 0) / 1e9)
+            for s in HfApi().model_info(repo, files_metadata=True).siblings
+            if s.rfilename.lower().endswith(".gguf") and s.rfilename.startswith(folder)]
+    return sorted(rows, key=lambda r: r[1])
+
+
 def _gpu_count():
     try:
         import torch
@@ -175,10 +191,12 @@ def _vram_args(gpus=None):
     """
     gpus = _gpu_count() if gpus is None else gpus
     if gpus >= 2:
-        # 'te' is what --clip-on-cpu's deprecation notice migrates to; sd.cpp
-        # also shows 'clip=' in the --backend example. if a build rejects 'te',
-        # swap it for 'clip' here.
-        return ["--backend", "diffusion=cuda0,vae=cuda0,te=cuda1"]
+        # module key for the text encoder is 'llm' (it's loaded via --llm, and
+        # 'llm' is what the source parses) -- NOT 'te'/'clip', which are the
+        # keys for the older CLIP/T5 encoders. Getting this wrong doesn't error:
+        # the assignment is just ignored and everything lands on device 0, which
+        # is exactly how 5.0+5.5+5.5GB ooms a 14.6GB card.
+        return ["--backend", "diffusion=cuda0,vae=cuda0,llm=cuda1"]
     return ["--offload-to-cpu"]
 
 

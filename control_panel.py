@@ -396,13 +396,14 @@ def _on_img_model_change(key):
     """list the picked stack's gguf quants, like the launch tab does for llms.
     empty for diffusers models and for stacks whose denoiser isn't gguf."""
     import gradio as gr
-    if key not in comfy.IMAGE_STACKS:
+    if key not in comfy.IMAGE_STACKS and key not in sdcpp.SD_MODELS:
         return gr.update(choices=[], value=None,
                          label="quant — diffusers models have no gguf variants")
     try:
-        rows = comfy.list_stack_quants(key)
+        rows = (sdcpp.list_quants(key) if key in sdcpp.SD_MODELS
+                else comfy.list_stack_quants(key))
     except Exception as e:
-        print(f"list_stack_quants({key}) failed: {e}")
+        print(f"quant lookup for {key} failed: {e}")
         rows = []
     return gr.update(
         choices=[(f"{fn.rsplit('/', 1)[-1]} — {gb:.1f} GB", fn) for fn, gb in rows],
@@ -414,8 +415,14 @@ def _on_img_model_change(key):
 def _list_img_loras(key, repo):
     """populate the lora picker from any repo id (blank = the stack's own)"""
     import gradio as gr
+    if key in sdcpp.SD_MODELS:
+        # sd.cpp takes loras as <lora:name:weight> inside the prompt plus
+        # --lora-model-dir, not as a loader node -- different mechanism, not wired
+        return gr.update(choices=[], value=None,
+                         label="lora — not wired for the sd.cpp backend yet")
     if key not in comfy.IMAGE_STACKS:
-        return gr.update(choices=[], value=None)
+        return gr.update(choices=[], value=None,
+                         label="lora — comfy stacks only")
     try:
         rows = comfy.list_stack_loras(key, (repo or "").strip() or None)
     except Exception as e:
@@ -441,8 +448,12 @@ def _img_setup(key, quant=None, lora=None, lora_repo=None, lora_strength=1.0):
         def work():
             _img_state.update(busy=True, error=None, pipe=None, model=key, backend="sdcpp")
             try:
+                # comfy keeps its models resident, so a stack loaded earlier is
+                # still holding ~11GB of gpu0 -- sd.cpp then ooms allocating its
+                # own weights. only one image backend gets the gpus at a time.
+                comfy.stop()
                 sdcpp.install()          # ~10-20 min the first time (cuda build)
-                sdcpp.fetch(key)
+                sdcpp.fetch(key, quants={"diffusion": quant} if quant else None)
                 _img_state["pipe"] = ("sdcpp", key)
             except Exception as e:
                 _log_tb(f"sdcpp setup {key}")
