@@ -409,7 +409,22 @@ def _on_img_model_change(key):
                "quant — this stack's denoiser isn't gguf, nothing to pick"))
 
 
-def _img_setup(key, quant=None):
+def _list_img_loras(key, repo):
+    """populate the lora picker from any repo id (blank = the stack's own)"""
+    import gradio as gr
+    if key not in comfy.IMAGE_STACKS:
+        return gr.update(choices=[], value=None)
+    try:
+        rows = comfy.list_stack_loras(key, (repo or "").strip() or None)
+    except Exception as e:
+        return gr.update(choices=[], value=None, label=f"lora — lookup failed: {e}")
+    return gr.update(
+        choices=[(f"{f.rsplit('/', 1)[-1]} — {gb:.2f} GB", f) for f, gb in rows],
+        value=None,
+        label=f"lora — {len(rows)} found" if rows else "lora — none in that repo")
+
+
+def _img_setup(key, quant=None, lora=None, lora_repo=None, lora_strength=1.0):
     if _img_state["busy"]:
         return _console("busy", "already installing — press Refresh for progress")
     if _llm_running():
@@ -425,7 +440,9 @@ def _img_setup(key, quant=None):
             _img_state.update(busy=True, error=None, pipe=None, model=key, backend="comfy")
             try:
                 comfy.install()
-                comfy.fetch_stack(key, unet=quant or None)
+                comfy.fetch_stack(key, unet=quant or None, lora=lora or None,
+                                  lora_repo=(lora_repo or "").strip() or None,
+                                  lora_strength=float(lora_strength or 1.0))
                 comfy.start()  # also mints a gui url for power users; not required here
                 _img_state["pipe"] = ("comfy", key)  # truthy sentinel = ready to generate
             except Exception as e:
@@ -789,6 +806,17 @@ def _build():
                         label="image model — comfy ones run headless (reliable); diffusers in-process")
                     img_quant = gr.Dropdown(choices=[], value=None, allow_custom_value=True,
                                             label="quant — pick a model to list; blank = stack default")
+                    with gr.Accordion("lora — optional, any repo", open=False):
+                        gr.Markdown('<div class="km-note">blank repo = look in the stack\'s own '
+                                    'repo. paste any hf repo id to pull a lora from elsewhere; '
+                                    'it stacks on top of a model\'s built-in lora.</div>')
+                        with gr.Row():
+                            img_lora_repo = gr.Textbox(label="lora repo — blank = this stack's",
+                                                       placeholder="author/some-loras", scale=3)
+                            img_lora_list = gr.Button("List", scale=1)
+                        img_lora = gr.Dropdown(choices=[], value=None, allow_custom_value=True,
+                                               label="lora — blank = none")
+                        img_lora_str = gr.Number(label="strength", value=1.0)
                     with gr.Row():
                         img_setup_btn = gr.Button("Install + load", variant="primary")
                         img_refresh_btn = gr.Button("Refresh")
@@ -817,7 +845,12 @@ def _build():
                         img_imp_status = gr.Textbox(label="result", lines=4)
 
             img_model.change(_on_img_model_change, inputs=img_model, outputs=img_quant)
-            img_setup_btn.click(_img_setup, inputs=[img_model, img_quant], outputs=img_status)
+            img_lora_list.click(_list_img_loras, inputs=[img_model, img_lora_repo],
+                                outputs=img_lora)
+            img_setup_btn.click(
+                _img_setup,
+                inputs=[img_model, img_quant, img_lora, img_lora_repo, img_lora_str],
+                outputs=img_status)
             img_refresh_btn.click(_img_refresh, outputs=[img_status, img_out])
             img_imp_btn.click(_import_image_model, inputs=img_imp_repo,
                               outputs=[img_model, img_imp_status])

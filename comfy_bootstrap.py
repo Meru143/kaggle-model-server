@@ -223,6 +223,9 @@ def image_stacks():
 # and build_image_workflow() reads it, so the graph can never ask comfy for a
 # quant we didn't download (that's an instant "model not found" otherwise).
 _unet_choice = {}
+# stack -> (lora_path, strength) picked in the studio. same contract as
+# _unet_choice: fetch_stack downloads it, build_image_workflow wires it in.
+_lora_choice = {}
 
 
 def _denoiser_of(key):
@@ -254,6 +257,36 @@ def list_stack_quants(key):
             and s.rfilename.startswith(folder)
             and ("uncond" in s.rfilename.lower()) == want_uncond]
     return sorted(rows, key=lambda r: r[1])
+
+
+def list_stack_loras(key, repo=None):
+    """[(path, gb)] of loras a repo offers -- the stack's own repo by default,
+    or any repo id you pass. paired with fetch_stack(lora=...) this makes the
+    lora slot generic: point it at whatever you want, nothing is hardcoded."""
+    d = _denoiser_of(key)
+    repo = repo or (d[0] if d else None)
+    if not repo:
+        return []
+    from huggingface_hub import HfApi
+    rows = [(s.rfilename, (s.size or 0) / 1e9)
+            for s in HfApi().model_info(repo, files_metadata=True).siblings
+            if s.rfilename.lower().endswith(".safetensors")
+            and "lora" in s.rfilename.lower()]
+    return sorted(rows)
+
+
+def _insert_lora(g, lora, strength=1.0, src="1", node="1L"):
+    """splice a LoraLoaderModelOnly between the denoiser and everything that
+    consumes it. family-agnostic: repoint every reference to the raw model
+    first, THEN add the node (so its own model input isn't rewired too)."""
+    for n in g.values():
+        for k, v in n["inputs"].items():
+            if v == [src, 0]:
+                n["inputs"][k] = [node, 0]
+    g[node] = {"class_type": "LoraLoaderModelOnly",
+               "inputs": {"lora_name": os.path.basename(lora),
+                          "strength_model": float(strength), "model": [src, 0]}}
+    return g
 
 
 def stack_repo(key):
@@ -416,9 +449,11 @@ def _place_workflows(repos):
             print(f"workflow scan skipped for {repo}: {e}")
 
 
-def fetch_stack(key, unet=None):
+def fetch_stack(key, unet=None, lora=None, lora_repo=None, lora_strength=1.0):
     """downloads a named model set and symlinks it into comfyui's model dirs.
-    unet= overrides just the unet gguf filename (e.g. a different quant)."""
+    unet= overrides just the unet gguf filename (e.g. a different quant).
+    lora= adds any lora (path within lora_repo, or within the stack's own repo)
+    on top of the denoiser at lora_strength."""
     files = STACKS[key]
     total = _stack_total(files)
     # kaggle scratch is ~60GB and ideogram4 alone is ~30GB. without this check a
@@ -455,6 +490,14 @@ def fetch_stack(key, unet=None):
             filename, swapped = unet, True
         print(f"fetching {repo} :: {filename} -> models/{subdir}/")
         _place(repo, filename, subdir)
+    if lora:
+        d = _denoiser_of(key)
+        lrepo = lora_repo or (d[0] if d else None)
+        print(f"fetching lora {lrepo} :: {lora}")
+        _place(lrepo, lora, "loras")
+        _lora_choice[key] = (lora, lora_strength)
+    else:
+        _lora_choice.pop(key, None)
     _place_workflows({repo for repo, _, _ in files})
     print(f"stack {key!r} in place")
 
@@ -670,6 +713,16 @@ def _round16(px, default):
 
 
 def build_image_workflow(stack, prompt, width=None, height=None, steps=None, seed=None):
+    """flat api-format graph for one image stack, with any studio-picked lora
+    spliced on top of the denoiser (node 1U, kept distinct from a stack's own
+    built-in lora at 1L so the two can stack)."""
+    g = _build_graph(stack, prompt, width, height, steps, seed)
+    if (choice := _lora_choice.get(stack)):
+        _insert_lora(g, choice[0], choice[1], src="1L" if "1L" in g else "1", node="1U")
+    return g
+
+
+def _build_graph(stack, prompt, width=None, height=None, steps=None, seed=None):
     """flat api-format graph for one image stack, prompt/size/steps/seed injected"""
     r = _IMAGE_RECIPE[stack]
     # honour a quant picked in the studio. _place symlinks by basename, so the
@@ -754,10 +807,7 @@ def build_image_workflow(stack, prompt, width=None, height=None, steps=None, see
              "13": {"class_type": "VAEDecode", "inputs": {"samples": ["12", 0], "vae": ["3", 0]}},
              "14": {"class_type": "SaveImage", "inputs": {"filename_prefix": "km", "images": ["13", 0]}}}
         if r.get("lora"):  # turbotime: patch the one transformer, keep cfg=1
-            g["1L"] = {"class_type": "LoraLoaderModelOnly",
-                       "inputs": {"lora_name": r["lora"], "strength_model": 1.0,
-                                  "model": ["1", 0]}}
-            g["7"]["inputs"]["model"] = ["1L", 0]
+            _insert_lora(g, r["lora"], 1.0, src="1", node="1L")
         if r.get("unet_uncond"):  # full quality: real cfg, second transformer
             g["1u"] = _loader_node(("safetensors", r["unet_uncond"]), main_dev)
             g["7"] = {"class_type": "DualModelGuider",
