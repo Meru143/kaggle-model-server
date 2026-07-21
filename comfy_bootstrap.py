@@ -156,6 +156,17 @@ STACKS = {
         ("Comfy-Org/Ideogram-4", "text_encoders/qwen3vl_8b_fp8_scaled.safetensors", "text_encoders"),
         ("Comfy-Org/Ideogram-4", "vae/flux2-vae.safetensors", "vae"),
     ],
+    # ideogram 4 TURBO: same conditional transformer, plus ostris' turbotime
+    # lora, which per its card makes ideogram a few-step model "with no CFG and
+    # no unconditional model". that removes BOTH costs that make the full stack
+    # unusable here -- ~25 steps -> 8, and two transformers per step -> one --
+    # so it's ~6x fewer denoiser passes. also skips the 5.5GB uncond download.
+    "ideogram4-turbo": [
+        ("Comfy-Org/Ideogram-4", "diffusion_models/ideogram4_fp8_scaled.safetensors", "diffusion_models"),
+        ("ostris/ideogram_4_turbotime_lora", "ideogram_4_turbotime_v1.safetensors", "loras"),
+        ("Comfy-Org/Ideogram-4", "text_encoders/qwen3vl_8b_fp8_scaled.safetensors", "text_encoders"),
+        ("Comfy-Org/Ideogram-4", "vae/flux2-vae.safetensors", "vae"),
+    ],
     # krea 2 turbo HD finetune (image): ships its own hd-tuned vae; same
     # qwen3-vl encoder. Q6_K (10.9GB) is the quality pick if vram allows.
     "krea2-hd": [
@@ -178,7 +189,7 @@ STACKS = {
 # picker isn't polluted with image models.
 IMAGE_STACKS = frozenset({
     "z-image", "krea2-turbo", "krea2-raw", "krea2-hd",
-    "flux1", "flux2-klein-v3", "ideogram4",
+    "flux1", "flux2-klein-v3", "ideogram4", "ideogram4-turbo",
 })
 assert IMAGE_STACKS <= STACKS.keys(), \
     f"IMAGE_STACKS names not in STACKS: {IMAGE_STACKS - STACKS.keys()}"
@@ -502,6 +513,11 @@ _IMAGE_RECIPE = {
                     unet_uncond="ideogram4_unconditional_fp8_scaled.safetensors",
                     clip=("qwen3vl_8b_fp8_scaled.safetensors", "ideogram4"),
                     vae="flux2-vae.safetensors", steps=25, cfg=7.0, mu=0.5, std=1.75),
+    # no unet_uncond + a lora => the single-transformer, cfg-free turbo path
+    "ideogram4-turbo": dict(family="ideogram4", unet=("safetensors", "ideogram4_fp8_scaled.safetensors"),
+                    lora="ideogram_4_turbotime_v1.safetensors",
+                    clip=("qwen3vl_8b_fp8_scaled.safetensors", "ideogram4"),
+                    vae="flux2-vae.safetensors", steps=8, cfg=1.0, mu=0.5, std=1.75),
 }
 assert set(_IMAGE_RECIPE) == set(IMAGE_STACKS), \
     f"image recipe / IMAGE_STACKS mismatch: {set(_IMAGE_RECIPE) ^ set(IMAGE_STACKS)}"
@@ -629,19 +645,22 @@ def build_image_workflow(stack, prompt, width=None, height=None, steps=None, see
              "14": {"class_type": "SaveImage", "inputs": {"filename_prefix": "km", "images": ["13", 0]}}}
         return g
 
-    if fam == "ideogram4":  # dual transformer (main + unconditional), best-effort
-        # BOTH transformers on gpu0 (~11GB together) and the 8b encoder alone on
-        # gpu1 (~9GB): that's the split that fits, and it's why this one went
-        # from 20 min of cpu-swapping to something usable.
+    if fam == "ideogram4":
+        # two shapes here. base graph = ONE transformer + plain cfg guider; then
+        #   lora        -> turbotime: few-step and cfg-free, stays single-model
+        #   unet_uncond -> full quality: real cfg against the separate 5.5GB
+        #                  unconditional transformer, i.e. TWO denoiser passes
+        #                  per step. that second pass is the whole reason the
+        #                  full stack is unusably slow on a t4.
+        # encoder sits on gpu1, transformer(s) + vae on gpu0.
         g = {"1": _loader_node(r["unet"], main_dev),
-             "1u": _loader_node(("safetensors", r["unet_uncond"]), main_dev),
              "2": _clip_node(r["clip"], enc_dev),
              "3": _vae_node(r["vae"], main_dev),
              "5": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["2", 0]}},
              "6": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["5", 0]}},
-             "7": {"class_type": "DualModelGuider",
-                   "inputs": {"cfg": r["cfg"], "model": ["1", 0], "positive": ["5", 0],
-                              "model_negative": ["1u", 0], "negative": ["6", 0]}},
+             "7": {"class_type": "CFGGuider",  # replaced below when uncond is used
+                   "inputs": {"cfg": r["cfg"], "model": ["1", 0],
+                              "positive": ["5", 0], "negative": ["6", 0]}},
              "8": {"class_type": "Ideogram4Scheduler",
                    "inputs": {"steps": steps, "width": w, "height": h, "mu": r["mu"], "std": r["std"]}},
              "9": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
@@ -652,6 +671,16 @@ def build_image_workflow(stack, prompt, width=None, height=None, steps=None, see
                                "sigmas": ["8", 0], "latent_image": ["11", 0]}},
              "13": {"class_type": "VAEDecode", "inputs": {"samples": ["12", 0], "vae": ["3", 0]}},
              "14": {"class_type": "SaveImage", "inputs": {"filename_prefix": "km", "images": ["13", 0]}}}
+        if r.get("lora"):  # turbotime: patch the one transformer, keep cfg=1
+            g["1L"] = {"class_type": "LoraLoaderModelOnly",
+                       "inputs": {"lora_name": r["lora"], "strength_model": 1.0,
+                                  "model": ["1", 0]}}
+            g["7"]["inputs"]["model"] = ["1L", 0]
+        if r.get("unet_uncond"):  # full quality: real cfg, second transformer
+            g["1u"] = _loader_node(("safetensors", r["unet_uncond"]), main_dev)
+            g["7"] = {"class_type": "DualModelGuider",
+                      "inputs": {"cfg": r["cfg"], "model": ["1", 0], "positive": ["5", 0],
+                                 "model_negative": ["1u", 0], "negative": ["6", 0]}}
         return g
 
     raise ValueError(f"unknown image family {fam!r} for stack {stack!r}")
