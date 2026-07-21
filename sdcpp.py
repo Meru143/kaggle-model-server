@@ -147,6 +147,41 @@ def _total(key, quants=None):
     return total
 
 
+def _gpu_count():
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return torch.cuda.device_count()
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=10)
+        return sum(1 for l in out.stdout.splitlines() if l.startswith("GPU "))
+    except Exception:
+        return 1
+
+
+def _vram_args(gpus=None):
+    """how to fit ~16.5GB of weights.
+
+    two cards -> pin modules to devices and keep everything RESIDENT in vram:
+    both denoisers + vae on cuda0 (~11.4GB), the text encoder alone on cuda1
+    (~5GB). that beats --offload-to-cpu, which parks weights in RAM and drags
+    them back over pcie every time they're needed -- placement only moves
+    activations at module boundaries, which are far smaller than weights.
+    (no nvlink on t4, but that's irrelevant here: nothing is split mid-module.)
+
+    one card -> fall back to cpu offload, since 16.5GB can't sit in 15GB.
+    """
+    gpus = _gpu_count() if gpus is None else gpus
+    if gpus >= 2:
+        # 'te' is what --clip-on-cpu's deprecation notice migrates to; sd.cpp
+        # also shows 'clip=' in the --backend example. if a build rejects 'te',
+        # swap it for 'clip' here.
+        return ["--backend", "diffusion=cuda0,vae=cuda0,te=cuda1"]
+    return ["--offload-to-cpu"]
+
+
 def _as_prompt(prompt, want_json):
     """ideogram4 expects a structured json prompt; a bare sentence gets wrapped
     into the minimal valid shape rather than confusing the model."""
@@ -163,7 +198,7 @@ def _as_prompt(prompt, want_json):
 
 
 def generate(key, prompt, width=1024, height=1024, steps=None, cfg_scale=None,
-             seed=-1, init_image=None, strength=0.75, offload=True, timeout=3600):
+             seed=-1, init_image=None, strength=0.75, vram="auto", timeout=3600):
     """run sd-cli once and return the png path."""
     if not os.path.exists(SD_BIN):
         raise RuntimeError("sd-cli isn't built yet -- run sdcpp.install() first")
@@ -181,9 +216,12 @@ def generate(key, prompt, width=1024, height=1024, steps=None, cfg_scale=None,
             "--steps", str(int(steps or cfg.get("steps", 20))),
             "--cfg-scale", str(float(cfg_scale if cfg_scale is not None else cfg.get("cfg", 7.0))),
             "--seed", str(int(seed)), "--output", out]
-    if offload:
-        # 16GB+ of weights against a 15GB card: keep idle components in ram
+    if vram == "auto":
+        cmd += _vram_args()
+    elif vram == "offload":
         cmd += ["--offload-to-cpu"]
+    elif vram == "split":
+        cmd += _vram_args(gpus=2)
     if init_image:
         cmd += ["--init-img", init_image, "--strength", str(float(strength))]
 
