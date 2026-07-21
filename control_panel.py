@@ -30,6 +30,7 @@ import requests
 
 import comfy_bootstrap as comfy
 import image_models
+import sdcpp
 from harness import (SERVER_LOG, _fmt_eta, _tail, detect_entry, list_quants,
                      progress_line, run, set_progress, stop)
 from image_models import IMAGE_MODELS
@@ -364,6 +365,7 @@ def _img_choices():
     """image dropdown: comfy stacks (headless, reliable) then diffusers models,
     each LABELED by its hf repo (author/name); the value stays the short key."""
     return ([(f"{comfy.stack_repo(k)}  ·  comfy ✓ reliable", k) for k in comfy.image_stacks()] +
+            [(f"{k}  ·  sd.cpp", k) for k in sorted(sdcpp.SD_MODELS)] +
             [(f"{_img_repo_label(k)}  ·  diffusers (experimental)", k) for k in sorted(IMAGE_MODELS)])
 
 
@@ -432,6 +434,26 @@ def _img_setup(key, quant=None, lora=None, lora_repo=None, lora_strength=1.0):
         return _console("err", f"an LLM ({_state['model']}) is running on gpu 0",
                         note="press Stop in the Launch tab first — image models want most "
                              "of the box's vram and will OOM sharing the gpu with an llm")
+
+    if key in sdcpp.SD_MODELS:
+        # models comfy's gguf loader can't read (ideogram4/flux2 archs). sd.cpp
+        # runs them natively -- one cli call, no node graph.
+        def work():
+            _img_state.update(busy=True, error=None, pipe=None, model=key, backend="sdcpp")
+            try:
+                sdcpp.install()          # ~10-20 min the first time (cuda build)
+                sdcpp.fetch(key)
+                _img_state["pipe"] = ("sdcpp", key)
+            except Exception as e:
+                _log_tb(f"sdcpp setup {key}")
+                _img_state["error"] = f"{type(e).__name__}: {e}"
+            finally:
+                _img_state["busy"] = False
+                set_progress("idle")
+        threading.Thread(target=work, daemon=True).start()
+        return _console("busy", f"building sd.cpp + fetching {key}", prog=True,
+                        note="first run compiles sd-cli with cuda (10-20 min); "
+                             "after that it's just the download")
 
     if key in comfy.IMAGE_STACKS:
         # the reliable path: boot comfy HEADLESS and drive it over http from the
@@ -528,7 +550,15 @@ def _img_generate(prompt, steps, width, height, init_image=None, denoise=0.75):
         _img_state.update(gen_busy=True, gen_error=None, last_image=None,
                           gen_t0=time.time(), gen_secs=None, gen_warn=None)
         try:
-            if _img_state.get("backend") == "comfy":
+            if _img_state.get("backend") == "sdcpp":
+                _img_state["last_image"] = sdcpp.generate(
+                    _img_state["model"], prompt,
+                    width=int(width) if width else 1024,
+                    height=int(height) if height else 1024,
+                    steps=int(steps) if steps else None,
+                    init_image=init_image or None,
+                    strength=float(denoise or 0.75))
+            elif _img_state.get("backend") == "comfy":
                 _img_state["last_image"] = comfy.generate_image(
                     _img_state["model"], prompt,
                     width=int(width) if width else None,
@@ -933,7 +963,8 @@ def launch_panel(auth=None):
     # allowed_paths: gradio only serves files from cwd/tempdir by default,
     # and generated images live under /kaggle/tmp/outputs
     kwargs = dict(share=True, auth=auth, server_port=7860, show_error=True,
-                  allowed_paths=[image_models.OUT_DIR, f"{comfy.COMFY_DIR}/output"])
+                  allowed_paths=[image_models.OUT_DIR, f"{comfy.COMFY_DIR}/output",
+                                 sdcpp.OUT_DIR])
     if _launch_takes_style(gr):
         kwargs.update(_style(gr))
     demo.launch(**kwargs)
