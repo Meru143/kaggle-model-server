@@ -21,6 +21,7 @@ best_dtype() probes the card (see its docstring): sm75 has no bf16 tensor
 cores, but bf16 arithmetic may still run, and it's what these models want.
 """
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -184,7 +185,8 @@ def install(key):
     print(f"installing for {key}: {pkgs}")
     # -U so kaggle's preinstalled older diffusers/hub get upgraded to a
     # consistent released set (pip's only-if-needed strategy leaves torch alone)
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", *pkgs], check=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", *pkgs],
+                   check=True, timeout=1800)
 
 
 def load(key, gpu=None):
@@ -284,10 +286,8 @@ def load(key, gpu=None):
         # t4 sdpa uses the math backend (no flash kernels on sm75), which
         # materializes the full attention matrix -- slicing shrinks the
         # peak where the model supports it; harmless no-op where it doesn't
-        try:
+        with contextlib.suppress(Exception):
             getattr(pipe, helper)()
-        except Exception:
-            pass
     try:
         # fp16 vae decode is the classic source of NaN -> black frames
         # (cards assume bf16's range; t4 is fp16-only). vaes are tiny, so
@@ -351,9 +351,17 @@ def best_dtype():
                 _ = h @ h
             torch.cuda.synchronize()
             fp_t = max(time.time() - t0, 1e-6)
+            ratio = bf_t / fp_t
+            # report the cost, but DON'T let it pick fp16. sm75 has no bf16
+            # tensor cores, so this ratio is routinely >4x -- and gating on it
+            # would silently hand back the fp16 black frames this whole probe
+            # exists to avoid (verified on a t4: fp16 = black, bf16 = a real
+            # image). a slow correct image beats a fast black one; anyone who
+            # wants the speed instead can set KM_IMAGE_DTYPE=fp16.
             _DTYPE = torch.bfloat16
-            print(f"bf16 compute works on this gpu ({bf_t / fp_t:.1f}x fp16's time) -- "
-                  f"using it; fp16 overflows these bf16-trained models to black frames")
+            print(f"bf16 compute works on this gpu ({ratio:.1f}x fp16's time) -- using it; "
+                  f"fp16 overflows these bf16-trained models to black frames. "
+                  f"KM_IMAGE_DTYPE=fp16 trades that back for speed.")
         except Exception as e:
             print(f"bf16 compute unavailable ({type(e).__name__}: {e}) -- staying on fp16")
     print(f"image compute dtype: {_DTYPE}")
@@ -419,8 +427,7 @@ if __name__ == "__main__":
     # gpu-free self-check: registry shape + defaults merge
     for k, c in IMAGE_MODELS.items():
         assert c["hf_repo"] and c["pip"] and "defaults" in c, k
-    class _P:
-        _km_defaults = {"num_inference_steps": 9, "guidance_scale": 0.0}
-    merged = {**_P._km_defaults, "num_inference_steps": 4}
+    _km_defaults = {"num_inference_steps": 9, "guidance_scale": 0.0}
+    merged = {**_km_defaults, "num_inference_steps": 4}
     assert merged == {"num_inference_steps": 4, "guidance_scale": 0.0}
     print("image_models self-check ok")

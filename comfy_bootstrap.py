@@ -14,6 +14,7 @@ usage (from any notebook that clones the repo, or the studio's video tab):
 logs: /kaggle/tmp/comfyui.log -- `!tail -50 /kaggle/tmp/comfyui.log`
 """
 
+import contextlib
 import json
 import os
 import random
@@ -197,7 +198,7 @@ IMAGE_STACKS = frozenset({
     "z-image", "krea2-turbo", "krea2-raw", "krea2-hd",
     "flux1", "flux2-klein-v3", "ideogram4", "ideogram4-turbo",
 })
-assert IMAGE_STACKS <= STACKS.keys(), \
+assert STACKS.keys() >= IMAGE_STACKS, \
     f"IMAGE_STACKS names not in STACKS: {IMAGE_STACKS - STACKS.keys()}"
 
 
@@ -406,13 +407,14 @@ def detect_stack(repo, quant=None):
 def _clone(url, dst):
     if os.path.exists(dst):
         return
-    subprocess.run(["git", "clone", "--depth", "1", url, dst], check=True)
+    subprocess.run(["git", "clone", "--depth", "1", url, dst], check=True, timeout=600)
 
 
 def _pip_requirements(pkg_dir):
     req = os.path.join(pkg_dir, "requirements.txt")
     if os.path.exists(req):
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", req], check=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", req],
+                       check=True, timeout=1800)
 
 
 def _stack_total(files):
@@ -546,43 +548,55 @@ def start(port=8188):
     the full node gui is served at that url."""
     stop()
     set_progress("load")
-    log_fh = open(COMFY_LOG, "w")
+    log_fh = open(COMFY_LOG, "w")  # noqa: SIM115 -- long-lived, closed in stop()
     _current["log_fh"] = log_fh
     proc = subprocess.Popen(
         # --enable-cors-header '*' swaps comfy's origin-only middleware -- which
         # 403s any request whose Host/Origin don't match, i.e. EVERY request
         # arriving through a cloudflared tunnel hostname -- for permissive cors,
         # so the public url actually loads the gui instead of "403 not authorized".
-        # (the url is the only secret anyway; comfy has no auth either way.)
-        [sys.executable, "main.py", "--listen", "0.0.0.0", "--port", str(port),
+        # comfy has no auth, so the URL IS the secret: treat it as a credential.
+        # listen on loopback only -- the cloudflared tunnel (localhost) is the
+        # sole intended ingress. start_new_session puts comfy in its own process
+        # group so stop() can kill its children too (a bare kill orphans them
+        # on the gpu).
+        [sys.executable, "main.py", "--listen", "127.0.0.1", "--port", str(port),
          "--force-fp16", "--enable-cors-header", "*"],
         cwd=COMFY_DIR, stdout=log_fh, stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
     _current["proc"] = proc
     _current["port"] = port
 
-    deadline = time.time() + 180
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"comfyui exited during startup. tail of {COMFY_LOG}:\n{_tail(COMFY_LOG)}")
-        try:
-            if requests.get(f"http://127.0.0.1:{port}/", timeout=3).status_code == 200:
-                break
-        except requests.exceptions.RequestException:
-            pass
-        time.sleep(2)
-    else:
-        raise RuntimeError(f"comfyui not up within 180s. tail of {COMFY_LOG}:\n{_tail(COMFY_LOG)}")
+    try:
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                raise RuntimeError(f"comfyui exited during startup. tail of {COMFY_LOG}:\n{_tail(COMFY_LOG)}")
+            try:
+                if requests.get(f"http://127.0.0.1:{port}/", timeout=3).status_code == 200:
+                    break
+            except requests.exceptions.RequestException:
+                pass
+            time.sleep(2)
+        else:
+            raise RuntimeError(f"comfyui not up within 180s. tail of {COMFY_LOG}:\n{_tail(COMFY_LOG)}")
 
-    url = start_tunnel(port)
-    # take ownership of the tunnel proc: an llm relaunch calls harness.stop(),
-    # which must not tear down the video tunnel
-    _current["tunnel"] = _harness_state["tunnel"]
-    _harness_state["tunnel"] = None
-    if _harness_state["log_fhs"]:
-        _current["tunnel_fh"] = _harness_state["log_fhs"].pop()
-    print(f"comfyui live at {url} (open it in a browser for the node gui)")
-    return url
+        url = start_tunnel(port)
+        # take ownership of the tunnel proc: an llm relaunch calls harness.stop(),
+        # which must not tear down the video tunnel
+        _current["tunnel"] = _harness_state["tunnel"]
+        _harness_state["tunnel"] = None
+        if _harness_state["log_fhs"]:
+            _current["tunnel_fh"] = _harness_state["log_fhs"].pop()
+        print(f"comfyui live at {url} (open it in a browser for the node gui)")
+        return url
+    except Exception:
+        # a failed start must not leave a live comfy holding the gpu (nor leak
+        # the log handle): stop() kills the process group + closes handles, then
+        # we re-raise the original error.
+        stop()
+        raise
 
 
 def queue_workflow(workflow, timeout=3600):
@@ -599,7 +613,13 @@ def queue_workflow(workflow, timeout=3600):
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        entry = requests.get(f"http://127.0.0.1:{port}/history/{prompt_id}", timeout=30).json().get(prompt_id)
+        try:
+            entry = requests.get(f"http://127.0.0.1:{port}/history/{prompt_id}",
+                                 timeout=30).json().get(prompt_id)
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(
+                f"comfyui went away mid-workflow ({type(e).__name__}). "
+                f"tail of {COMFY_LOG}:\n{_tail(COMFY_LOG)}") from e
         if entry:
             status = entry.get("status", {})
             if status.get("status_str") == "error":
@@ -695,7 +715,9 @@ def _has_node(cls):
             r.raise_for_status()
             _NODE_CACHE["nodes"] = set(r.json())
         except Exception:
-            _NODE_CACHE["nodes"] = set()  # comfy down / old build -> core only
+            # don't cache a failure: a transient hiccup must not permanently
+            # disable the MultiGPU loaders. retry on the next call.
+            return False
     return cls in _NODE_CACHE["nodes"]
 
 
@@ -906,20 +928,38 @@ def stop():
     for key in ("proc", "tunnel"):
         proc = _current[key]
         if proc and proc.poll() is None:
-            proc.send_signal(signal.SIGTERM)
+            # comfy runs in its own session (start_new_session=True) so we can
+            # kill its whole process group -- comfy spawns children a bare
+            # proc.kill() would orphan on the gpu. the tunnel (cloudflared) is
+            # NOT a group leader, so killpg would hit the notebook itself: only
+            # signal it directly.
+            own_group = (key == "proc")
+            try:
+                if own_group:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                else:
+                    proc.send_signal(signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.send_signal(signal.SIGTERM)
             try:
                 proc.wait(timeout=15)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                try:
+                    if own_group:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except (ProcessLookupError, PermissionError, OSError):
+                    proc.kill()
+                proc.wait()  # reap: no zombie, gpu actually freed
         _current[key] = None
     for key in ("log_fh", "tunnel_fh"):
         if _current[key]:
-            try:
+            with contextlib.suppress(OSError):
                 _current[key].close()
-            except OSError:
-                pass
         _current[key] = None
     _current["port"] = None
+    _NODE_CACHE.clear()  # next start() must re-probe the running comfy's nodes
     print("stopped comfyui")
 
 

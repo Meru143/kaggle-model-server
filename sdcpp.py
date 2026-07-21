@@ -23,7 +23,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import time
 
 if os.path.isdir("/kaggle"):
@@ -84,25 +83,25 @@ def install(jobs=None):
     os.makedirs(build, exist_ok=True)
 
     set_progress("build")
-    log = open(SD_LOG, "w")
-    try:
-        cfg = ["cmake", "-B", build, "-S", SD_DIR,
-               "-DCMAKE_BUILD_TYPE=Release",
-               "-DSD_CUDA=ON",
-               "-DCMAKE_CUDA_ARCHITECTURES=75",   # t4 is sm75
-               # kaggle's image has no linkable libcuda.so, so cmake never creates
-               # CUDA::cuda_driver and the link step dies. same fix as llama.cpp.
-               "-DGGML_CUDA_NO_VMM=ON",
-               # skip libwebp/libwebm -- we only ever want png out
-               "-DSD_WEBP=OFF", "-DSD_WEBM=OFF"]
-        subprocess.run(cfg, stdout=log, stderr=subprocess.STDOUT, check=True)
-        subprocess.run(["cmake", "--build", build, "--config", "Release",
-                        "-j", str(jobs or os.cpu_count() or 4)],
-                       stdout=log, stderr=subprocess.STDOUT, check=True)
-    except subprocess.CalledProcessError as e:
-        log.close()
-        raise RuntimeError(f"sd.cpp build failed. tail of {SD_LOG}:\n{_tail(SD_LOG)}") from e
-    log.close()
+    with open(SD_LOG, "w") as log:
+        try:
+            cfg = ["cmake", "-B", build, "-S", SD_DIR,
+                   "-DCMAKE_BUILD_TYPE=Release",
+                   "-DSD_CUDA=ON",
+                   "-DCMAKE_CUDA_ARCHITECTURES=75",   # t4 is sm75
+                   # kaggle's image has no linkable libcuda.so, so cmake never creates
+                   # CUDA::cuda_driver and the link step dies. same fix as llama.cpp.
+                   "-DGGML_CUDA_NO_VMM=ON",
+                   # skip libwebp/libwebm -- we only ever want png out
+                   "-DSD_WEBP=OFF", "-DSD_WEBM=OFF"]
+            subprocess.run(cfg, stdout=log, stderr=subprocess.STDOUT, check=True,
+                           timeout=600)
+            subprocess.run(["cmake", "--build", build, "--config", "Release",
+                            "-j", str(jobs or os.cpu_count() or 4)],
+                           stdout=log, stderr=subprocess.STDOUT, check=True,
+                           timeout=3600)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"sd.cpp build failed. tail of {SD_LOG}:\n{_tail(SD_LOG)}") from e
     if not os.path.exists(SD_BIN):
         raise RuntimeError(f"build finished but {SD_BIN} is missing. tail of {SD_LOG}:\n"
                            f"{_tail(SD_LOG)}")
@@ -259,7 +258,7 @@ if __name__ == "__main__":
         "diffusion": "/w/cond.gguf", "uncond": "/w/uncond.gguf",
         "llm": "/w/llm.gguf", "vae": "/w/vae.safetensors"}
     assert set(_ROLE_FLAG) == {"diffusion", "uncond", "llm", "vae"}
-    for role, flag in _ROLE_FLAG.items():
+    for flag in _ROLE_FLAG.values():
         assert flag.startswith("--")
     # plain text must become valid json for ideogram, json must pass through
     wrapped = _as_prompt("a fox in the snow", True)

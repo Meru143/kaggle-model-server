@@ -21,6 +21,22 @@ import subprocess
 import sys
 import time
 
+
+def _set_gpu(gpu):
+    """point this process at one gpu. warns if cuda is already initialized
+    here -- CUDA_VISIBLE_DEVICES only takes effect before the first cuda init,
+    so a helper run after other gpu work in the same kernel may land on the
+    wrong card (the module-docstring caveat). restart the kernel to reset."""
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    try:
+        import torch
+        if torch.cuda.is_initialized():
+            print(f"tasks: warning -- cuda was already initialized in this process, "
+                  f"so CUDA_VISIBLE_DEVICES={gpu} may not take effect")
+    except ImportError:
+        pass
+
+
 _OCR_PROMPT = (
     "\nExtract all readable content from the image in natural human reading "
     "order and output the result as a single Markdown document. For charts or "
@@ -35,7 +51,7 @@ _OCR_PROMPT = (
 
 def ocr_pages(images, gpu: int = 1):
     """page images (paths or PIL) -> list of markdown strings (ATH-MaaS/OvisOCR2)"""
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    _set_gpu(gpu)
     try:
         from PIL import Image
         from vllm import LLM, SamplingParams
@@ -59,7 +75,7 @@ def ocr_pages(images, gpu: int = 1):
 def parse_pdf(path, out_dir="/kaggle/tmp/outputs/ocr", gpu: int = 1):
     """pdf -> per-page markdown via baidu/Unlimited-OCR infer_multi.
     returns out_dir (results are also written there by the model)."""
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    _set_gpu(gpu)
     try:
         import fitz  # pymupdf
         import torch
@@ -96,7 +112,7 @@ def transcribe(audio_path, gpu: int = 1, port=8009):
             "https://wheels.vllm.ai/68b4a1d582818e67adc903bf1b8fc5a5447da2fa/cu129")
     import requests
     log_path = "/kaggle/tmp/vllm-transcribe.log"
-    log = open(log_path, "w")  # log to file, never PIPE (unread pipes block the child)
+    log = open(log_path, "w")  # noqa: SIM115 -- closed in the finally below
     proc = subprocess.Popen(
         ["vllm", "serve", "OpenMOSS-Team/MOSS-Transcribe-Diarize",
          "--trust-remote-code", "--port", str(port)],
@@ -125,7 +141,15 @@ def transcribe(audio_path, gpu: int = 1, port=8009):
         r.raise_for_status()
         return r.json()["text"]
     finally:
-        proc.terminate()
+        # escalate so a vllm that ignores SIGTERM can't keep holding the gpu,
+        # and reap it so we don't leave a zombie behind
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
         log.close()
 
 
@@ -134,7 +158,7 @@ def embed(texts, gpu: int = 1, model="nvidia/Nemotron-3-Embed-1B-BF16", dual=Fal
     gpus: embed(texts, model="nvidia/Nemotron-3-Embed-8B-BF16", dual=True)
     -- 16GB of weights won't fit one t4, dual shards it via device_map."""
     if not dual:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+        _set_gpu(gpu)
     try:
         import torch
         from sentence_transformers import SentenceTransformer
@@ -156,7 +180,7 @@ def sound_effect(text, out_path, seconds=5, gpu: int = 1):
     """text -> wav sound effect via OpenMOSS-Team/MOSS-SoundEffect-v2.0
     (1.3B DiT + flow matching; up to 30s at 48kHz). card recommends 100
     steps, cfg 4.0."""
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    _set_gpu(gpu)
     try:
         import torch
         from moss_soundeffect_v2 import MossSoundEffectPipeline
@@ -183,9 +207,10 @@ def image_to_3d(image_path, out_dir="/kaggle/tmp/outputs/3d", model="sf3d", gpu:
             "spar3d": "https://github.com/Stability-AI/stable-point-aware-3d"}[model]
     workdir = f"/kaggle/tmp/{repo.rsplit('/', 1)[1]}"
     if not os.path.exists(workdir):
-        subprocess.run(["git", "clone", "--depth", "1", repo, workdir], check=True)
+        subprocess.run(["git", "clone", "--depth", "1", repo, workdir],
+                       check=True, timeout=600)
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r",
-                        f"{workdir}/requirements.txt"], check=True)
+                        f"{workdir}/requirements.txt"], check=True, timeout=1800)
     os.makedirs(out_dir, exist_ok=True)
     log_path = f"/kaggle/tmp/{model}.log"
     with open(log_path, "w") as log:  # log to file, never PIPE
@@ -201,7 +226,7 @@ def image_to_3d(image_path, out_dir="/kaggle/tmp/outputs/3d", model="sf3d", gpu:
 def tts(text, out_path, speaker="Ryan", language="Auto", instruct=None, gpu: int = 1):
     """text -> wav at out_path via Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice.
     speakers: Vivian/Serena/Uncle_Fu/Dylan/Eric/Ryan/Aiden/Ono_Anna/Sohee."""
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    _set_gpu(gpu)
     try:
         import soundfile as sf
         import torch

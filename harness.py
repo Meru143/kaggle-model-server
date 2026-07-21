@@ -14,6 +14,7 @@ logs: llama-server and cloudflared both write to files under WORK_DIR
 is your post-mortem tool.
 """
 
+import contextlib
 import glob
 import os
 import re
@@ -22,6 +23,13 @@ import signal
 import subprocess
 import time
 from collections import Counter
+
+# multi-GB gguf downloads must stage on the ~60GB scratch disk, not the
+# quota-capped home/working volume (~/.cache/huggingface). set BEFORE importing
+# huggingface_hub, which freezes this path into a constant at import time.
+# mirrors what image_models / sdcpp / comfy_bootstrap already do.
+if os.path.isdir("/kaggle"):
+    os.environ.setdefault("HF_HOME", "/kaggle/tmp/hf-home")
 
 import requests
 from huggingface_hub import HfApi, hf_hub_download, list_repo_files
@@ -126,10 +134,8 @@ def _dirsize(path):
             dirs[:] = []
             continue
         for f in files:
-            try:
+            with contextlib.suppress(OSError):
                 total += os.path.getsize(os.path.join(root, f))
-            except OSError:
-                pass
     return total
 
 
@@ -220,17 +226,15 @@ def ensure_llamacpp_binary(repo_url=None):
     if not os.path.exists(build_dir):
         subprocess.run(
             ["git", "clone", "--depth", "1", repo_url, build_dir],
-            check=True,
+            check=True, timeout=600,
         )
     # a failed earlier configure poisons build/CMakeCache.txt (find_library
     # NOTFOUND results are cached and re-trusted, e.g. the libcuda.so probe),
     # so scrub the cache before re-configuring. compiled objects survive, so
     # an interrupted compile still resumes instead of starting over.
     shutil.rmtree(f"{build_dir}/build/CMakeFiles", ignore_errors=True)
-    try:
+    with contextlib.suppress(OSError):
         os.remove(f"{build_dir}/build/CMakeCache.txt")
-    except OSError:
-        pass
     subprocess.run(
         [
             "cmake", "-B", "build",
@@ -255,12 +259,12 @@ def ensure_llamacpp_binary(repo_url=None):
             # default shared build would also need the libggml/libllama .so's)
             "-DBUILD_SHARED_LIBS=OFF",
         ],
-        cwd=build_dir, check=True,
+        cwd=build_dir, check=True, timeout=600,
     )
     subprocess.run(
         ["cmake", "--build", "build", "--config", "Release",
          "--target", "llama-server", "-j", str(os.cpu_count() or 4)],
-        cwd=build_dir, check=True,
+        cwd=build_dir, check=True, timeout=3600,
     )
     print(f"tip: save {built_bin} to a Kaggle Dataset as 'llama-server-{slug}' "
           "so future sessions skip this build")
@@ -289,6 +293,14 @@ def ensure_cloudflared():
     with open(CLOUDFLARED_BIN, "wb") as f:
         f.write(r.content)
     os.chmod(CLOUDFLARED_BIN, 0o755)
+    # sanity-check before trusting it: a truncated/tampered download must fail
+    # loudly here, not later as a cryptic tunnel error. (todo: pin a version +
+    # sha256 instead of /releases/latest/ for a real supply-chain guarantee.)
+    ver = subprocess.run([CLOUDFLARED_BIN, "--version"],
+                         capture_output=True, text=True, timeout=30)
+    if ver.returncode != 0:
+        os.remove(CLOUDFLARED_BIN)
+        raise RuntimeError("downloaded cloudflared failed its --version sanity check")
     return CLOUDFLARED_BIN
 
 
@@ -386,7 +398,8 @@ def read_card_flags(repo, filename=None):
     repo) is itself MTP."""
     try:
         p = hf_hub_download(repo, "README.md", token=os.environ.get("HF_TOKEN"))
-        text = open(p, encoding="utf-8", errors="replace").read()
+        with open(p, encoding="utf-8", errors="replace") as f:
+            text = f.read()
     except Exception:
         return {}
     low = text.lower()
@@ -567,12 +580,11 @@ def stop():
                 proc.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait()  # reap: no zombie, and the port is actually freed
         _current[key] = None
     for fh in _current["log_fhs"]:
-        try:
+        with contextlib.suppress(OSError):
             fh.close()
-        except OSError:
-            pass
     _current["log_fhs"] = []
     _current["port"] = None
     print("stopped current server + tunnel" if was_running else "nothing was running")
@@ -589,6 +601,10 @@ def _wait_for_health(proc, port, timeout):
             r = requests.get(f"http://127.0.0.1:{port}/health", timeout=3)
             if r.status_code == 200:
                 return True
+            # NOTE: do NOT treat 5xx as fatal here. llama-server documents 503
+            # {"message": "Loading model"} as its NORMAL state while weights load
+            # -- aborting on it would kill every launch on the first poll. proc
+            # death (checked above) is the real failure signal.
         except requests.exceptions.RequestException:
             pass
         time.sleep(2)
@@ -598,15 +614,19 @@ def _wait_for_health(proc, port, timeout):
 def start_server(model_key, model_cfg, port=8080, api_key=None, health_timeout=600):
     """stops any running model, boots the requested one. always displaces, never
     coexists. model_cfg is an effective config dict (registry entry + overrides)."""
-    stop()
-
+    # stage the binary + weights FIRST (a 15-min build and multi-GB download),
+    # then stop() the live model at the last moment -- a slow or failed switch
+    # no longer takes down the currently-serving model and leaves nothing up.
     binary = ensure_llamacpp_binary(model_cfg.get("llama_cpp_repo"))
     weights = ensure_weights(model_cfg)
+    stop()
 
     cmd = [
         binary,
         "--model", weights,
-        "--host", "0.0.0.0",
+        # bind loopback only: the cloudflared tunnel (localhost) is the sole
+        # intended ingress, so don't expose the raw port on every interface.
+        "--host", "127.0.0.1",
         "--port", str(port),
         "--ctx-size", str(model_cfg.get("ctx", 8192)),
         "--n-gpu-layers", str(model_cfg.get("ngl", 99)),
@@ -627,15 +647,25 @@ def start_server(model_key, model_cfg, port=8080, api_key=None, health_timeout=6
     # logs go to a file, NOT subprocess.PIPE: an unread PIPE fills its ~64KB
     # buffer and then silently blocks the server mid-session. a file also
     # survives for post-mortem.
-    log_fh = open(SERVER_LOG, "w")
+    log_fh = open(SERVER_LOG, "w")  # noqa: SIM115 -- long-lived, closed in stop()
     _current["log_fhs"].append(log_fh)
-    print(f"starting {model_key}: {' '.join(cmd)}")
+    # never echo the secret: redact the api-key value in the printed command
+    # (the notebook output is saved/shareable -- printing it leaks the gate).
+    safe_cmd = list(cmd)
+    if api_key and "--api-key" in safe_cmd:
+        safe_cmd[safe_cmd.index("--api-key") + 1] = "****"
+    print(f"starting {model_key}: {' '.join(safe_cmd)}")
     set_progress("load")
     proc = subprocess.Popen(cmd, env=env, stdout=log_fh, stderr=subprocess.STDOUT)
     _current["server"] = proc
     _current["port"] = port
 
     if not _wait_for_health(proc, port, health_timeout):
+        # don't leave a half-started server holding the gpu forever
+        proc.kill()
+        proc.wait()
+        _current["server"] = None
+        _current["port"] = None
         raise RuntimeError(
             f"{model_key} didn't come up healthy within {health_timeout}s. "
             f"tail of {SERVER_LOG}:\n{_tail(SERVER_LOG)}"
@@ -665,7 +695,7 @@ def start_tunnel(port=8080):
     binary = ensure_cloudflared()
     token = os.environ.get("CF_TUNNEL_TOKEN")
     cmd = _tunnel_cmd(binary, port, token)
-    log_fh = open(TUNNEL_LOG, "w")
+    log_fh = open(TUNNEL_LOG, "w")  # noqa: SIM115 -- long-lived, closed in stop()
     _current["log_fhs"].append(log_fh)
     proc = subprocess.Popen(cmd, stdout=log_fh, stderr=subprocess.STDOUT)
     _current["tunnel"] = proc

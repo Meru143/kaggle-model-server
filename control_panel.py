@@ -111,14 +111,17 @@ def _set_hf_token(tok):
     if not tok:
         os.environ.pop("HF_TOKEN", None)
         return gr.update(value=""), "token cleared"
-    os.environ["HF_TOKEN"] = tok
     try:
         from huggingface_hub import HfApi
         user = HfApi(token=tok).whoami()["name"]
-        msg = (f"token set — authenticated as {user}. gated models still need "
-               f"their license accepted on the model page (one click, once).")
     except Exception as e:
-        msg = f"token stored, but hf rejected it ({type(e).__name__}) — double-check it"
+        # don't store a rejected token: it would 401 every later download that
+        # reads HF_TOKEN -- even ungated ones. leave the env untouched.
+        return gr.update(value=""), \
+            f"token rejected by hf ({type(e).__name__}) — not stored, double-check it"
+    os.environ["HF_TOKEN"] = tok  # only keep a token that actually works
+    msg = (f"token set — authenticated as {user}. gated models still need "
+           f"their license accepted on the model page (one click, once).")
     return gr.update(value=""), msg
 
 
@@ -268,8 +271,8 @@ def _import_model(repo):
     card_bits = []
     if entry.get("sampling"):
         card_bits.append("sampling " + ", ".join(f"{k}={v}" for k, v in entry["sampling"].items()))
-    if entry.get("extra_args") != ["--jinja"]:
-        card_bits.append("flags " + " ".join(entry["extra_args"]))
+    if entry.get("extra_args", ["--jinja"]) != ["--jinja"]:
+        card_bits.append("flags " + " ".join(entry.get("extra_args", [])))
     card_line = ("from card (verify): " + " · ".join(card_bits) + "\n") if card_bits else \
                 "no recipe found in the card — using --jinja + default sampling\n"
     msg = (f"added {key!r}: {entry['hf_file']} ({entry['est_vram_gb'] - 2:.1f}GB -> {gpus})\n"
@@ -335,7 +338,10 @@ def _chat(message, history, system_prompt=""):
             data = line[6:].decode("utf-8")
             if data == "[DONE]":
                 break
-            choices = json.loads(data).get("choices") or [{}]
+            try:
+                choices = json.loads(data).get("choices") or [{}]
+            except json.JSONDecodeError:
+                continue  # skip a malformed/partial sse chunk
             acc += choices[0].get("delta", {}).get("content") or ""
             if acc:
                 yield acc
@@ -560,6 +566,19 @@ def _img_generate(prompt, steps, width, height, init_image=None, denoise=0.75):
     def work():
         _img_state.update(gen_busy=True, gen_error=None, last_image=None,
                           gen_t0=time.time(), gen_secs=None, gen_warn=None)
+
+        # clamp so a public link can't be used to OOM/DoS the shared gpu --
+        # blank passes through (each backend picks its own default).
+        def _bounded(v, lo, hi):
+            if not v:
+                return v
+            try:
+                return max(lo, min(hi, int(v)))
+            except (TypeError, ValueError):
+                return v
+        nonlocal width, height, steps  # rebind the handler params, not new locals
+        width, height = _bounded(width, 256, 2048), _bounded(height, 256, 2048)
+        steps = _bounded(steps, 1, 50)
         try:
             if _img_state.get("backend") == "sdcpp":
                 _img_state["last_image"] = sdcpp.generate(
@@ -731,7 +750,7 @@ button:focus-visible, input:focus-visible {{ outline: 2px solid {_C['run']} !imp
 """
 
 _HDR = ('<div><h1>kaggle-model-server<span class="km-cursor">_</span></h1>'
-        '<p>llm · image · video off a free t4×2 — launch, watch the run light, go</p></div>')
+        '<p>llm · image · video off a free t4x2 — launch, watch the run light, go</p></div>')
 
 
 def _style(gr):
@@ -808,7 +827,7 @@ def _build():
                         ctx = gr.Number(label="ctx",
                                         value=MODELS[sorted(MODELS)[0]].get("ctx", 8192))
                         n_cpu_moe = gr.Number(label="n_cpu_moe — blank = default", value=None)
-                    api_key = gr.Textbox(label="api key — recommended, the tunnel url is public")
+                    api_key = gr.Textbox(label="api key — recommended, the tunnel url is public", type="password")
                     with gr.Row():
                         launch_btn = gr.Button("Launch", variant="primary")
                         stop_btn = gr.Button("Stop", variant="stop")
@@ -984,20 +1003,30 @@ def _hold_cell():
         print("released; kaggle's idle timer is now running again.", flush=True)
 
 
-def launch_panel(auth=None, keep_alive=True):
-    """builds and serves the studio; returns the gradio app. auth=("user","pass")
-    is strongly recommended -- the share url is public. keep_alive=True blocks
-    the calling cell (see _hold_cell) -- pass False if you want the cell back."""
+def launch_panel(auth=None, keep_alive=True, *, share=True, allow_public=False):
+    """builds and serves the studio; returns the gradio app.
+
+    the share url is PUBLIC AND GUESSABLE, so auth=("user","pass") is required
+    whenever share=True: calling launch_panel() bare would otherwise hand anyone
+    on the internet full control of your gpus. to deliberately run an open panel
+    (e.g. on a trusted lan), pass allow_public=True.
+
+    keep_alive=True blocks the calling cell (see _hold_cell) -- pass False if
+    you want the cell back."""
     import gradio as gr
+    if share and auth is None and not allow_public:
+        raise ValueError(
+            "launch_panel() refuses to share publicly without auth -- anyone with "
+            'the link would control your gpus. pass auth=("user", "pass"), or '
+            "allow_public=True to deliberately run an open panel.")
     if auth is None:
-        print("WARNING: no auth -- anyone with the share link controls your gpus. "
-              'pass auth=("user", "pass").')
+        print("WARNING: no auth -- anyone with the share link controls your gpus.")
     demo = _build()
     # show_error surfaces the real message in the browser when an event
     # fails client-side (instead of gradio's bare "Error" pill).
     # allowed_paths: gradio only serves files from cwd/tempdir by default,
     # and generated images live under /kaggle/tmp/outputs
-    kwargs = dict(share=True, auth=auth, server_port=7860, show_error=True,
+    kwargs = dict(share=share, auth=auth, server_port=7860, show_error=True,
                   allowed_paths=[image_models.OUT_DIR, f"{comfy.COMFY_DIR}/output",
                                  sdcpp.OUT_DIR])
     if _launch_takes_style(gr):
