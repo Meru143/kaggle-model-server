@@ -454,7 +454,12 @@ def queue_workflow(workflow, timeout=3600):
                                 COMFY_DIR, "output", f.get("subfolder", ""), f["filename"]))
                 return paths
         time.sleep(3)
-    raise TimeoutError(f"workflow still running after {timeout}s -- check {COMFY_LOG}")
+    raise TimeoutError(
+        f"workflow still running after {timeout / 60:.0f} min. a t4 has no fp8 compute "
+        f"(sm75 dequantizes to fp16 every pass) and ideogram4 runs TWO transformers per "
+        f"step, so the cost is raw compute -- splitting vram across cards can't fix it. "
+        f"cut steps and render at 768 instead of 1024, or use a light stack "
+        f"(z-image / krea2-turbo). log: {COMFY_LOG}")
 
 
 # ---- headless image generation ------------------------------------------
@@ -652,7 +657,7 @@ def build_image_workflow(stack, prompt, width=None, height=None, steps=None, see
     raise ValueError(f"unknown image family {fam!r} for stack {stack!r}")
 
 
-def generate_image(stack, prompt, width=None, height=None, steps=None, seed=None, timeout=1800):
+def generate_image(stack, prompt, width=None, height=None, steps=None, seed=None, timeout=3600):
     """headless prompt->png: builds the stack's workflow, queues it on the
     already-running comfy server, returns the saved png path. call start()
     (via the studio's Install+load) once for the stack before generating."""

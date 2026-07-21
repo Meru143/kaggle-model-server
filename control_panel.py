@@ -30,7 +30,7 @@ import requests
 
 import comfy_bootstrap as comfy
 import image_models
-from harness import (SERVER_LOG, _tail, detect_entry, list_quants,
+from harness import (SERVER_LOG, _fmt_eta, _tail, detect_entry, list_quants,
                      progress_line, run, set_progress, stop)
 from image_models import IMAGE_MODELS
 from model_registry import MODELS
@@ -44,7 +44,8 @@ _state = {"busy": False, "url": None, "error": None, "model": None,
           "api_key": None, "gen": 0}
 _img_state = {"busy": False, "pipe": None, "error": None, "model": None,
               "gen_busy": False, "gen_error": None, "last_image": None,
-              "backend": None}  # "comfy" (headless) or "diffusers" (in-process)
+              "backend": None,  # "comfy" (headless) or "diffusers" (in-process)
+              "gen_t0": None, "gen_secs": None}  # live timer + final duration
 _vid_state = {"busy": False, "url": None, "error": None, "stack": None, "gen": 0}
 
 
@@ -451,12 +452,22 @@ def _img_status():
         return _console("err", "image model failed to load", err=_img_state["error"],
                         note=f"full traceback: {STUDIO_LOG}")
     if _img_state["gen_busy"]:
-        return _console("busy", "generating — 30-90s on t4s; press Refresh", gpu=True)
+        # live clock: a t4 run is minutes for the heavy models, and a frozen
+        # "generating…" with no number is indistinguishable from a hang
+        el = time.time() - (_img_state["gen_t0"] or time.time())
+        return _console("busy", f"generating — {_fmt_eta(el)} elapsed", gpu=True,
+                        note="heavy models take minutes on a t4; fewer steps and "
+                             "768 instead of 1024 are the two big speed levers")
     if _img_state["gen_error"]:
-        return _console("err", "generation failed", err=_img_state["gen_error"],
+        secs = _img_state["gen_secs"]
+        return _console("err", f"generation failed after {_fmt_eta(secs or 0)}",
+                        err=_img_state["gen_error"],
                         note=f"full traceback also in {STUDIO_LOG}")
     if _img_state["last_image"]:
-        return _console("live", f"saved {_img_state['last_image']} — press Refresh after the next Generate")
+        secs = _img_state["gen_secs"]
+        took = f" in {_fmt_eta(secs)}" if secs else ""
+        return _console("live", f"saved {_img_state['last_image']}{took}"
+                                " — press Refresh after the next Generate")
     if _img_state["pipe"] is not None:
         return _console("live", f"{_img_state['model']} ready — write a prompt and press Generate")
     return _console("idle", "no image model loaded — pick one and press Install + load")
@@ -474,7 +485,8 @@ def _img_generate(prompt, steps, width, height):
         return _img_refresh()
 
     def work():
-        _img_state.update(gen_busy=True, gen_error=None, last_image=None)
+        _img_state.update(gen_busy=True, gen_error=None, last_image=None,
+                          gen_t0=time.time(), gen_secs=None)
         try:
             if _img_state.get("backend") == "comfy":
                 _img_state["last_image"] = comfy.generate_image(
@@ -495,6 +507,7 @@ def _img_generate(prompt, steps, width, height):
         except Exception:
             _img_state["gen_error"] = _log_tb("image generate")[-1500:]
         finally:
+            _img_state["gen_secs"] = time.time() - (_img_state["gen_t0"] or time.time())
             _img_state["gen_busy"] = False
 
     threading.Thread(target=work, daemon=True).start()
