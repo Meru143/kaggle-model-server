@@ -292,8 +292,15 @@ def load(key, gpu=None):
     return pipe
 
 
+# set by generate() when the output is unusable; the studio reads it so a
+# black frame doesn't get reported as a cheerful "saved ok" with no explanation
+LAST_WARNING = None
+
+
 def generate(pipe, prompt, **overrides):
     """runs the pipeline, saves a png to /kaggle/tmp/outputs/, returns the path"""
+    global LAST_WARNING
+    LAST_WARNING = None
     os.makedirs(OUT_DIR, exist_ok=True)
     params = {**getattr(pipe, "_km_defaults", {}), **overrides}
     t0 = time.time()
@@ -313,10 +320,12 @@ def generate(pipe, prompt, **overrides):
     image.save(path)
     import numpy as np
     if np.asarray(image).max() <= 2:  # all-black frame = fp16 overflow (NaN latents)
-        print("WARNING: output is a black frame -- latents overflowed fp16 "
-              "somewhere upstream (t4 has no bf16). try more steps, a different "
-              "prompt length, or another model; if it persists for this model, "
-              "report it -- the fix is upcasting its hot component to fp32.")
+        LAST_WARNING = (
+            "all-black frame: the latents overflowed fp16 (a t4 has no bf16, and "
+            "these pipelines assume it). this is the diffusers path failing, not "
+            "your prompt -- switch to the same model's '· comfy ✓ reliable' entry "
+            "in the dropdown, which renders it correctly.")
+        print("WARNING: " + LAST_WARNING)
     print(f"{path}  ({time.time() - t0:.1f}s, {params or 'pipeline defaults'})")
     return path
 

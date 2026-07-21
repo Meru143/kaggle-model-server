@@ -45,7 +45,8 @@ _state = {"busy": False, "url": None, "error": None, "model": None,
 _img_state = {"busy": False, "pipe": None, "error": None, "model": None,
               "gen_busy": False, "gen_error": None, "last_image": None,
               "backend": None,  # "comfy" (headless) or "diffusers" (in-process)
-              "gen_t0": None, "gen_secs": None}  # live timer + final duration
+              "gen_t0": None, "gen_secs": None,  # live timer + final duration
+              "gen_warn": None}  # e.g. black frame -- saved, but not usable
 _vid_state = {"busy": False, "url": None, "error": None, "stack": None, "gen": 0}
 
 
@@ -466,6 +467,9 @@ def _img_status():
     if _img_state["last_image"]:
         secs = _img_state["gen_secs"]
         took = f" in {_fmt_eta(secs)}" if secs else ""
+        if _img_state["gen_warn"]:  # saved, but the image is unusable -- say so
+            return _console("err", f"unusable output after {_fmt_eta(secs or 0)}",
+                            note=_img_state["gen_warn"])
         return _console("live", f"saved {_img_state['last_image']}{took}"
                                 " — press Refresh after the next Generate")
     if _img_state["pipe"] is not None:
@@ -486,7 +490,7 @@ def _img_generate(prompt, steps, width, height):
 
     def work():
         _img_state.update(gen_busy=True, gen_error=None, last_image=None,
-                          gen_t0=time.time(), gen_secs=None)
+                          gen_t0=time.time(), gen_secs=None, gen_warn=None)
         try:
             if _img_state.get("backend") == "comfy":
                 _img_state["last_image"] = comfy.generate_image(
@@ -504,6 +508,8 @@ def _img_generate(prompt, steps, width, height):
                     kwargs["height"] = int(height)
                 _img_state["last_image"] = image_models.generate(
                     _img_state["pipe"], prompt, **kwargs)
+                # a black frame still "saves" -- carry the reason to the console
+                _img_state["gen_warn"] = image_models.LAST_WARNING
         except Exception:
             _img_state["gen_error"] = _log_tb("image generate")[-1500:]
         finally:
