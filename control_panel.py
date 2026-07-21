@@ -911,6 +911,13 @@ def _build():
                         img_denoise = gr.Number(label="strength — 0.3 subtle … 0.9 loose",
                                                 value=0.75)
                     img_go = gr.Button("Generate", variant="primary")
+                    gr.Markdown('<div class="km-note"><b>ideogram only:</b> it ships a safety filter '
+                                'baked into its weights — a flat grey "blocked" card instead of your '
+                                'image. it can\'t be disabled from here (not by any flag, runtime or '
+                                'quant) and it false-fires on innocent prompts. a fuller json prompt '
+                                'trips it less: <code>{"high_level_description": "...", '
+                                '"style_description": {"photo": "..."}}</code>. krea2 / z-image / flux '
+                                'have no such filter.</div>')
                     gr.Markdown('<div class="km-note">the comfy models are the dependable path on t4 '
                                 '(comfy\'s fp16 works where diffusers black-frames). ideogram4 · comfy is '
                                 'experimental — its graph is newer and may still need the node gui. '

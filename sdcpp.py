@@ -17,6 +17,16 @@ logs: /kaggle/tmp/sdcpp.log -- `!tail -50 /kaggle/tmp/sdcpp.log`
 ideogram4 wants a STRUCTURED JSON prompt (high_level_description /
 style_description / ...), not a sentence -- comfy's official template builds one
 too. generate() wraps a plain string into the minimal shape automatically.
+
+SAFETY FILTER: ideogram4 ships a content filter BAKED INTO THE WEIGHTS. When it
+fires you get a flat grey "Image blocked by safety filter" card instead of your
+image. It cannot be disabled, tuned, or bypassed from here -- not by a flag, not
+by a different runtime (we've seen it in both comfy and sd.cpp), and not by
+quant choice. It is documented to false-fire on entirely innocuous prompts
+("trees" was blocked here). The only lever that reportedly helps is a RICHER
+json prompt -- a one-field stub is far more likely to trip it than a filled-in
+style_description. If it keeps blocking, the answer is a different model: krea2,
+z-image and flux carry no such filter.
 """
 
 import json
