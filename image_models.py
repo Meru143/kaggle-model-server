@@ -110,8 +110,12 @@ IMAGE_MODELS = {
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
         "quantize": None,
         "gated": True,
+        # the pipeline defaults guidance_schedule to a 48-entry (7.0,)*45+(3.0,)*3
+        # tuple and refuses guidance_scale AND a schedule together. these fal
+        # distills run cfg-free at 1.0 (and a 48-step schedule is meaningless at
+        # 8 steps), so null the schedule explicitly.
         "defaults": {"num_inference_steps": 8, "guidance_scale": 1.0,
-                     "height": 768, "width": 768},
+                     "guidance_schedule": None, "height": 768, "width": 768},
     },
     # fal's 20-step sibling of -instant: same recipe, more steps, better
     # detail (card). GATED like the rest of the ideogram family.
@@ -122,8 +126,9 @@ IMAGE_MODELS = {
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
         "quantize": None,
         "gated": True,
+        # same guidance_schedule=None reason as -instant above
         "defaults": {"num_inference_steps": 20, "guidance_scale": 1.0,
-                     "height": 768, "width": 768},
+                     "guidance_schedule": None, "height": 768, "width": 768},
     },
 }
 

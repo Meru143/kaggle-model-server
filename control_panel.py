@@ -419,9 +419,11 @@ def _img_setup(key):
 
     # diffusers path (experimental on t4)
     if IMAGE_MODELS.get(key, {}).get("comfy_only"):
+        # name the comfy entry by the SAME label the dropdown shows, or the
+        # pointer reads like it's talking about a model that isn't listed
         return _console("err", f"{key} needs both t4s — not doable via diffusers here",
-                        note="pick 'ideogram4 · comfy' from this dropdown instead — it runs "
-                             "headless across both cards")
+                        note=f"pick '{comfy.stack_repo('ideogram4')}  ·  comfy ✓ reliable' from "
+                             "this dropdown instead — same model, runs headless on both cards")
 
     def work():
         _img_state.update(busy=True, error=None, pipe=None, model=key, backend="diffusers")
