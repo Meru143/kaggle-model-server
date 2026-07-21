@@ -517,7 +517,7 @@ def _img_refresh():
     return _img_status(), _img_state["last_image"]
 
 
-def _img_generate(prompt, steps, width, height):
+def _img_generate(prompt, steps, width, height, init_image=None, denoise=0.75):
     """runs in the background: a t4 generation takes minutes, and holding the
     request open that long gets killed by the share tunnel (the bare 'Error'
     pills with no message). refresh pulls the result."""
@@ -533,7 +533,17 @@ def _img_generate(prompt, steps, width, height):
                     _img_state["model"], prompt,
                     width=int(width) if width else None,
                     height=int(height) if height else None,
-                    steps=int(steps) if steps else None)
+                    steps=int(steps) if steps else None,
+                    init_image=init_image or None,
+                    denoise=float(denoise or 0.75))
+            elif init_image:
+                # diffusers img2img is a different pipeline class entirely, not a
+                # kwarg -- don't silently ignore the attachment and hand back a
+                # plain text2image, which would look like the upload did nothing
+                raise RuntimeError(
+                    "attaching an image only works on the comfy models for now "
+                    "(the '· comfy ✓ reliable' ones). the diffusers path needs a "
+                    "separate img2img pipeline.")
             else:
                 kwargs = {}
                 if steps:
@@ -828,6 +838,15 @@ def _build():
                     gr.Markdown('<div class="km-note">comfy models render at 1024² (blank = default) '
                                 'and run on both t4s via comfyui in the background — no node gui to open. '
                                 'diffusers models run in-process on one t4: keep those to 768².</div>')
+                    with gr.Accordion("attach an image — optional (img2img)", open=False):
+                        gr.Markdown('<div class="km-note">start from a picture instead of noise. '
+                                    'strength is how much freedom the model gets: 0.3 keeps your '
+                                    'image and restyles lightly, 0.8 keeps only the composition. '
+                                    'the output size comes from your image, so width/height are '
+                                    'ignored. comfy models only, and not flux2/ideogram yet.</div>')
+                        img_init = gr.Image(label="source image", type="filepath")
+                        img_denoise = gr.Number(label="strength — 0.3 subtle … 0.9 loose",
+                                                value=0.75)
                     img_go = gr.Button("Generate", variant="primary")
                     gr.Markdown('<div class="km-note">the comfy models are the dependable path on t4 '
                                 '(comfy\'s fp16 works where diffusers black-frames). ideogram4 · comfy is '
@@ -854,7 +873,8 @@ def _build():
             img_refresh_btn.click(_img_refresh, outputs=[img_status, img_out])
             img_imp_btn.click(_import_image_model, inputs=img_imp_repo,
                               outputs=[img_model, img_imp_status])
-            img_go.click(_img_generate, inputs=[img_prompt, img_steps, img_w, img_h],
+            img_go.click(_img_generate,
+                         inputs=[img_prompt, img_steps, img_w, img_h, img_init, img_denoise],
                          outputs=[img_status, img_out])
         with gr.Tab("video"):
             gr.Markdown('<div class="km-note">video runs through comfyui on both t4s. it boots '

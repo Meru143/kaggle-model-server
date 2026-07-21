@@ -275,6 +275,44 @@ def list_stack_loras(key, repo=None):
     return sorted(rows)
 
 
+def _stage_input_image(path):
+    """put a file where comfy's LoadImage can find it. comfy runs on this same
+    box, so a copy into its input/ dir beats POSTing multipart to /upload/image."""
+    dst_dir = f"{COMFY_DIR}/input"
+    os.makedirs(dst_dir, exist_ok=True)
+    name = f"km_in_{int(time.time())}{os.path.splitext(path)[1].lower() or '.png'}"
+    shutil.copy(path, os.path.join(dst_dir, name))
+    return name
+
+
+def _apply_img2img(g, image_name, denoise):
+    """start from a supplied picture instead of noise: swap the empty-latent node
+    for LoadImage -> VAEEncode and turn the sampler's denoise down. output size
+    comes from the image, so width/height stop mattering."""
+    latent = next((i for i, n in g.items()
+                   if n["class_type"].startswith("Empty") and "Latent" in n["class_type"]), None)
+    vae = next((i for i, n in g.items() if n["class_type"].startswith("VAELoader")), None)
+    ksampler = next((i for i, n in g.items() if n["class_type"] == "KSampler"), None)
+    if not (latent and vae):
+        raise ValueError("no empty-latent/vae node to swap for img2img")
+    if not ksampler:
+        # flux2 / ideogram drive denoise through the sigma schedule, not a
+        # `denoise` input -- wiring that blind is how we'd ship a broken graph
+        raise ValueError(
+            "img2img isn't wired for this model yet: it uses the SamplerCustomAdvanced "
+            "path (flux2-klein / ideogram), where denoise lives in the sigma schedule "
+            "rather than a denoise input. use z-image, krea2 or flux1 to start from an image.")
+    g["20"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
+    g["21"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["20", 0], "vae": [vae, 0]}}
+    for n in g.values():
+        for k, v in n["inputs"].items():
+            if v == [latent, 0]:
+                n["inputs"][k] = ["21", 0]
+    g.pop(latent)
+    g[ksampler]["inputs"]["denoise"] = float(denoise)
+    return g
+
+
 def _insert_lora(g, lora, strength=1.0, src="1", node="1L"):
     """splice a LoraLoaderModelOnly between the denoiser and everything that
     consumes it. family-agnostic: repoint every reference to the raw model
@@ -712,13 +750,17 @@ def _round16(px, default):
     return max(256, (px // 16) * 16)  # 16-multiple keeps every latent packer happy
 
 
-def build_image_workflow(stack, prompt, width=None, height=None, steps=None, seed=None):
+def build_image_workflow(stack, prompt, width=None, height=None, steps=None, seed=None,
+                         init_image=None, denoise=0.75):
     """flat api-format graph for one image stack, with any studio-picked lora
     spliced on top of the denoiser (node 1U, kept distinct from a stack's own
-    built-in lora at 1L so the two can stack)."""
+    built-in lora at 1L so the two can stack). init_image= starts from a picture
+    (img2img) instead of noise, at the given denoise strength."""
     g = _build_graph(stack, prompt, width, height, steps, seed)
     if (choice := _lora_choice.get(stack)):
         _insert_lora(g, choice[0], choice[1], src="1L" if "1L" in g else "1", node="1U")
+    if init_image:
+        _apply_img2img(g, init_image, denoise)
     return g
 
 
@@ -818,7 +860,8 @@ def _build_graph(stack, prompt, width=None, height=None, steps=None, seed=None):
     raise ValueError(f"unknown image family {fam!r} for stack {stack!r}")
 
 
-def generate_image(stack, prompt, width=None, height=None, steps=None, seed=None, timeout=3600):
+def generate_image(stack, prompt, width=None, height=None, steps=None, seed=None,
+                   timeout=3600, init_image=None, denoise=0.75):
     """headless prompt->png: builds the stack's workflow, queues it on the
     already-running comfy server, returns the saved png path. call start()
     (via the studio's Install+load) once for the stack before generating."""
@@ -826,7 +869,9 @@ def generate_image(stack, prompt, width=None, height=None, steps=None, seed=None
         raise ValueError(f"{stack!r} has no headless image recipe (video stack?)")
     if not (_current["proc"] and _current["proc"].poll() is None):
         raise RuntimeError("comfy isn't running -- press Install + load for this image stack first")
-    wf = build_image_workflow(stack, prompt, width, height, steps, seed)
+    staged = _stage_input_image(init_image) if init_image else None
+    wf = build_image_workflow(stack, prompt, width, height, steps, seed,
+                              init_image=staged, denoise=denoise)
     paths = queue_workflow(wf, timeout=timeout)
     imgs = [p for p in paths if p.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))]
     if not imgs:
