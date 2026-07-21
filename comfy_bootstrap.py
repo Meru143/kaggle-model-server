@@ -207,9 +207,19 @@ def image_stacks():
 
 def stack_repo(key):
     """the stack's primary (first/denoiser) hf repo -- lets the studio label its
-    dropdowns with a real author/name instead of the short internal alias."""
+    dropdowns with a real author/name instead of the short internal alias.
+
+    when two stacks share a denoiser (ideogram4 vs ideogram4-turbo) the repo
+    alone renders two identical dropdown rows, so add whatever actually
+    distinguishes them -- the lora repo, else the internal key."""
     files = STACKS.get(key)
-    return files[0][0] if files else key
+    if not files:
+        return key
+    primary = files[0][0]
+    if sum(1 for f in STACKS.values() if f and f[0][0] == primary) == 1:
+        return primary
+    lora = next((r for r, _, sub in files if sub == "loras" and r != primary), None)
+    return f"{primary}  +  {lora.split('/')[-1]}" if lora else f"{primary}  ({key})"
 
 
 _LINGBOT_NODE_REPO = "https://github.com/RealRebelAI/ComfyUI_Rebels_LingBot"
