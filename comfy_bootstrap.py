@@ -167,6 +167,20 @@ STACKS = {
         ("Comfy-Org/Ideogram-4", "text_encoders/qwen3vl_8b_fp8_scaled.safetensors", "text_encoders"),
         ("Comfy-Org/Ideogram-4", "vae/flux2-vae.safetensors", "vae"),
     ],
+    # ideogram 4 GGUF: the small-footprint build. everything quantized -- Q4_K
+    # denoiser (5.8GB vs the fp8 repack's ~10GB) AND a gguf text encoder (5.0GB
+    # vs 9.4GB), so the whole stack is ~11.5GB instead of ~29.5GB. that is what
+    # makes it survive the 60GB scratch disk next to other stacks. carries the
+    # turbotime lora too, so it's single-transformer/few-step like -turbo.
+    # pick a different quant in the studio's quant box (list_stack_quants).
+    # NOTE: this repo also ships explicit nsfw loras -- deliberately NOT fetched;
+    # nsfw generation violates kaggle tos and risks the account.
+    "ideogram4-gguf": [
+        ("rectangleworm/ideogram-4-gguf", "diffusion/cond/ideogram4-Q4_K.gguf", "unet"),
+        ("ostris/ideogram_4_turbotime_lora", "ideogram_4_turbotime_v1.safetensors", "loras"),
+        ("rectangleworm/ideogram-4-gguf", "text_encoder/Qwen3-VL-8B-Q4_K_M.gguf", "text_encoders"),
+        ("rectangleworm/ideogram-4-gguf", "vae/flux2-vae.safetensors", "vae"),
+    ],
     # krea 2 turbo HD finetune (image): ships its own hd-tuned vae; same
     # qwen3-vl encoder. Q6_K (10.9GB) is the quality pick if vram allows.
     "krea2-hd": [
@@ -189,7 +203,7 @@ STACKS = {
 # picker isn't polluted with image models.
 IMAGE_STACKS = frozenset({
     "z-image", "krea2-turbo", "krea2-raw", "krea2-hd",
-    "flux1", "flux2-klein-v3", "ideogram4", "ideogram4-turbo",
+    "flux1", "flux2-klein-v3", "ideogram4", "ideogram4-turbo", "ideogram4-gguf",
 })
 assert IMAGE_STACKS <= STACKS.keys(), \
     f"IMAGE_STACKS names not in STACKS: {IMAGE_STACKS - STACKS.keys()}"
@@ -203,6 +217,38 @@ def video_stacks():
 def image_stacks():
     """stack keys that produce stills -- the comfy image path"""
     return sorted(k for k in STACKS if k in IMAGE_STACKS)
+
+
+# stack -> denoiser filename the user actually picked. fetch_stack() records it
+# and build_image_workflow() reads it, so the graph can never ask comfy for a
+# quant we didn't download (that's an instant "model not found" otherwise).
+_unet_choice = {}
+
+
+def _denoiser_of(key):
+    """(repo, path_in_repo) of the stack's denoiser, or None"""
+    for repo, fn, sub in STACKS.get(key) or []:
+        if sub in ("unet", "diffusion_models"):
+            return repo, fn
+    return None
+
+
+def list_stack_quants(key):
+    """every gguf the stack's denoiser repo offers, [(path, gb)] smallest first
+    -- the image-tab equivalent of harness.list_quants for llms. scoped to the
+    denoiser's own folder so an ideogram repo doesn't offer its UNCONDITIONAL
+    weights as if they were quants of the conditional model."""
+    d = _denoiser_of(key)
+    if not d:
+        return []
+    repo, fn = d
+    folder = fn.rsplit("/", 1)[0] + "/" if "/" in fn else ""
+    from huggingface_hub import HfApi
+    rows = [(s.rfilename, (s.size or 0) / 1e9)
+            for s in HfApi().model_info(repo, files_metadata=True).siblings
+            if s.rfilename.lower().endswith(".gguf")
+            and s.rfilename.startswith(folder)]
+    return sorted(rows, key=lambda r: r[1])
 
 
 def stack_repo(key):
@@ -393,9 +439,15 @@ def fetch_stack(key, unet=None):
             cfg = hf_hub_download("robbyant/lingbot-video-moe-30b-a3b", "transformer/config.json")
             os.makedirs(f"{node_dir}/model_assets", exist_ok=True)
             shutil.copy(cfg, f"{node_dir}/model_assets/transformer_config_30b.json")
+    if unet:
+        _unet_choice[key] = unet  # so the workflow asks for the quant we fetch
+    swapped = False
     for repo, filename, subdir in files:
-        if unet and subdir == "unet":
-            filename = unet
+        # swap only the FIRST denoiser: ideogram ships cond + uncond in the same
+        # folder, and pointing both at one file would fetch it twice and drop the
+        # unconditional model
+        if unet and not swapped and subdir in ("unet", "diffusion_models"):
+            filename, swapped = unet, True
         print(f"fetching {repo} :: {filename} -> models/{subdir}/")
         _place(repo, filename, subdir)
     _place_workflows({repo for repo, _, _ in files})
@@ -523,6 +575,11 @@ _IMAGE_RECIPE = {
                     unet_uncond="ideogram4_unconditional_fp8_scaled.safetensors",
                     clip=("qwen3vl_8b_fp8_scaled.safetensors", "ideogram4"),
                     vae="flux2-vae.safetensors", steps=25, cfg=7.0, mu=0.5, std=1.75),
+    # all-gguf small build: same turbo graph, quantized denoiser + text encoder
+    "ideogram4-gguf": dict(family="ideogram4", unet=("gguf", "ideogram4-Q4_K.gguf"),
+                    lora="ideogram_4_turbotime_v1.safetensors",
+                    clip=("Qwen3-VL-8B-Q4_K_M.gguf", "ideogram4"),
+                    vae="flux2-vae.safetensors", steps=8, cfg=1.0, mu=0.5, std=1.75),
     # no unet_uncond + a lora => the single-transformer, cfg-free turbo path
     "ideogram4-turbo": dict(family="ideogram4", unet=("safetensors", "ideogram4_fp8_scaled.safetensors"),
                     lora="ideogram_4_turbotime_v1.safetensors",
@@ -582,6 +639,11 @@ def _clip_node(clip, device=None):
     if len(clip) == 3:  # dual (flux1): clip_l + t5
         base = {"clip_name1": clip[0], "clip_name2": clip[1], "type": clip[2]}
         core, mg = "DualCLIPLoader", "DualCLIPLoaderMultiGPU"
+    elif clip[0].lower().endswith(".gguf"):
+        # a quantized text encoder needs ComfyUI-GGUF's loader; the core
+        # CLIPLoader only reads safetensors
+        base = {"clip_name": clip[0], "type": clip[1]}
+        core, mg = "CLIPLoaderGGUF", "CLIPLoaderGGUFMultiGPU"
     else:
         base = {"clip_name": clip[0], "type": clip[1]}
         core, mg = "CLIPLoader", "CLIPLoaderMultiGPU"
@@ -605,6 +667,11 @@ def _round16(px, default):
 def build_image_workflow(stack, prompt, width=None, height=None, steps=None, seed=None):
     """flat api-format graph for one image stack, prompt/size/steps/seed injected"""
     r = _IMAGE_RECIPE[stack]
+    # honour a quant picked in the studio. _place symlinks by basename, so the
+    # graph references the basename even when the repo path has folders.
+    if (picked := _unet_choice.get(stack)):
+        r = {**r, "unet": ("gguf" if picked.lower().endswith(".gguf") else "safetensors",
+                           os.path.basename(picked))}
     w, h = _round16(width, 1024), _round16(height, 1024)
     steps = int(steps) if steps else r["steps"]
     seed = random.randint(0, 2**63 - 1) if seed is None else int(seed)

@@ -390,7 +390,26 @@ def _import_image_model(repo):
     return gr.update(choices=_img_choices(), value=key), msg
 
 
-def _img_setup(key):
+def _on_img_model_change(key):
+    """list the picked stack's gguf quants, like the launch tab does for llms.
+    empty for diffusers models and for stacks whose denoiser isn't gguf."""
+    import gradio as gr
+    if key not in comfy.IMAGE_STACKS:
+        return gr.update(choices=[], value=None,
+                         label="quant — diffusers models have no gguf variants")
+    try:
+        rows = comfy.list_stack_quants(key)
+    except Exception as e:
+        print(f"list_stack_quants({key}) failed: {e}")
+        rows = []
+    return gr.update(
+        choices=[(f"{fn.rsplit('/', 1)[-1]} — {gb:.1f} GB", fn) for fn, gb in rows],
+        value=None,
+        label=("quant — blank = stack default" if rows else
+               "quant — this stack's denoiser isn't gguf, nothing to pick"))
+
+
+def _img_setup(key, quant=None):
     if _img_state["busy"]:
         return _console("busy", "already installing — press Refresh for progress")
     if _llm_running():
@@ -406,7 +425,7 @@ def _img_setup(key):
             _img_state.update(busy=True, error=None, pipe=None, model=key, backend="comfy")
             try:
                 comfy.install()
-                comfy.fetch_stack(key)
+                comfy.fetch_stack(key, unet=quant or None)
                 comfy.start()  # also mints a gui url for power users; not required here
                 _img_state["pipe"] = ("comfy", key)  # truthy sentinel = ready to generate
             except Exception as e:
@@ -768,6 +787,8 @@ def _build():
                     img_model = gr.Dropdown(
                         choices=_img_choices(), value="z-image",
                         label="image model — comfy ones run headless (reliable); diffusers in-process")
+                    img_quant = gr.Dropdown(choices=[], value=None, allow_custom_value=True,
+                                            label="quant — pick a model to list; blank = stack default")
                     with gr.Row():
                         img_setup_btn = gr.Button("Install + load", variant="primary")
                         img_refresh_btn = gr.Button("Refresh")
@@ -795,7 +816,8 @@ def _build():
                         img_imp_btn = gr.Button("Fetch and add", variant="primary")
                         img_imp_status = gr.Textbox(label="result", lines=4)
 
-            img_setup_btn.click(_img_setup, inputs=img_model, outputs=img_status)
+            img_model.change(_on_img_model_change, inputs=img_model, outputs=img_quant)
+            img_setup_btn.click(_img_setup, inputs=[img_model, img_quant], outputs=img_status)
             img_refresh_btn.click(_img_refresh, outputs=[img_status, img_out])
             img_imp_btn.click(_import_image_model, inputs=img_imp_repo,
                               outputs=[img_model, img_imp_status])
