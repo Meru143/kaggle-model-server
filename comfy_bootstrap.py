@@ -243,11 +243,16 @@ def list_stack_quants(key):
         return []
     repo, fn = d
     folder = fn.rsplit("/", 1)[0] + "/" if "/" in fn else ""
+    # folder scoping alone isn't enough: some repos (stduhpf) keep the
+    # unconditional weights at the SAME level as the conditional ones, so also
+    # match on the uncond-ness of the name we started from
+    want_uncond = "uncond" in fn.lower()
     from huggingface_hub import HfApi
     rows = [(s.rfilename, (s.size or 0) / 1e9)
             for s in HfApi().model_info(repo, files_metadata=True).siblings
             if s.rfilename.lower().endswith(".gguf")
-            and s.rfilename.startswith(folder)]
+            and s.rfilename.startswith(folder)
+            and ("uncond" in s.rfilename.lower()) == want_uncond]
     return sorted(rows, key=lambda r: r[1])
 
 
