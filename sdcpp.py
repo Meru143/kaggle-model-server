@@ -48,7 +48,17 @@ SD_MODELS = {
                    "diffusion/uncond/ideogram4_unconditional_Q4_K.gguf"),
         "llm": ("rectangleworm/ideogram-4-gguf", "text_encoder/Qwen3-VL-8B-Q4_K_M.gguf"),
         "vae": ("rectangleworm/ideogram-4-gguf", "vae/flux2-vae.safetensors"),
-        "steps": 25, "cfg": 7.0, "json_prompt": True,
+        # use_uncond=False -> skip the separate 5.5GB unconditional transformer
+        # and run cfg-free. Observed 3x: every run that loaded the uncond model
+        # returned ideogram's "Image blocked by safety filter" card (comfy fp8
+        # AND sd.cpp gguf, on prompts as harmless as "trees"), while the run
+        # without it produced a real image. Note ideogram ships a SEPARATE
+        # unconditional model at all, which is unusual -- ordinary cfg reuses
+        # the same weights with empty conditioning.
+        # Bonus: one denoiser pass per step instead of two = ~2x faster, and
+        # 5.3GB less to download. Flip to True to get the old behaviour back.
+        "use_uncond": False,
+        "steps": 25, "cfg": 1.0, "json_prompt": True,
     },
 }
 
@@ -117,7 +127,7 @@ def fetch(key, quants=None):
     set_progress("download", total=_total(key, quants), watch=os.environ.get("HF_HOME"))
     got = {}
     for role in ("diffusion", "uncond", "llm", "vae"):
-        if role not in cfg:
+        if role not in cfg or (role == "uncond" and not cfg.get("use_uncond")):
             continue
         repo, path = cfg[role]
         path = (quants or {}).get(role, path)
@@ -132,7 +142,7 @@ def _total(key, quants=None):
     from huggingface_hub import HfApi
     cfg, api, sizes, total = SD_MODELS[key], HfApi(), {}, 0
     for role in ("diffusion", "uncond", "llm", "vae"):
-        if role not in cfg:
+        if role not in cfg or (role == "uncond" and not cfg.get("use_uncond")):
             continue
         repo, path = cfg[role]
         path = (quants or {}).get(role, path)
