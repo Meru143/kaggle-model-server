@@ -583,8 +583,11 @@ def _img_generate(prompt, steps, width, height, init_image=None, denoise=0.75):
             if _img_state.get("backend") == "sdcpp":
                 _img_state["last_image"] = sdcpp.generate(
                     _img_state["model"], prompt,
-                    width=int(width) if width else 1024,
-                    height=int(height) if height else 1024,
+                    # 768 not 1024: measured 23.4 s/it on a t4, so 1024^2 is a
+                    # ~10 min image. fewer pixels cuts both the sampling time
+                    # and the vae decode buffer.
+                    width=int(width) if width else 768,
+                    height=int(height) if height else 768,
                     steps=int(steps) if steps else None,
                     init_image=init_image or None,
                     strength=float(denoise or 0.75))

@@ -195,8 +195,16 @@ def _vram_args(gpus=None):
         # keys for the older CLIP/T5 encoders. Getting this wrong doesn't error:
         # the assignment is just ignored and everything lands on device 0, which
         # is exactly how 5.0+5.5+5.5GB ooms a 14.6GB card.
-        return ["--backend", "diffusion=cuda0,vae=cuda0,llm=cuda1"]
-    return ["--offload-to-cpu"]
+        #
+        # vae goes on cuda1, NOT cuda0: decode allocates a compute buffer sized
+        # by the image (6.6GB at 1024^2), and cuda0 is already holding both
+        # 5.5GB transformers. cuda1 only has the encoder, so there's room. this
+        # bites at the very END of a run -- sampling finishes, then decode ooms.
+        return ["--backend", "diffusion=cuda0,llm=cuda1,vae=cuda1",
+                # and tile the decode so that buffer scales with the tile, not
+                # the whole image -- belt and braces for big sizes.
+                "--vae-tiling"]
+    return ["--offload-to-cpu", "--vae-tiling"]
 
 
 def _as_prompt(prompt, want_json):
@@ -214,7 +222,7 @@ def _as_prompt(prompt, want_json):
     return json.dumps({"high_level_description": s})
 
 
-def generate(key, prompt, width=1024, height=1024, steps=None, cfg_scale=None,
+def generate(key, prompt, width=768, height=768, steps=None, cfg_scale=None,
              seed=-1, init_image=None, strength=0.75, vram="auto", timeout=3600):
     """run sd-cli once and return the png path."""
     if not os.path.exists(SD_BIN):
