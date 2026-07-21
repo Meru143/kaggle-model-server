@@ -171,9 +171,14 @@ def progress_line():
             eta = (total - done) / rate if rate > 0 else 0
             filled = int(frac * 24)
             bar = "█" * filled + "░" * (24 - filled)
+            # rate is an AVERAGE, so a wedged download still prints a healthy
+            # MB/s. once we're past the expected total the eta is meaningless
+            # (and "eta 0s" reads as "done") -- say so instead of lying.
+            eta_s = "?  (past expected size — check free disk)" if done >= total \
+                else _fmt_eta(eta)
             return (f"downloading  {bar}  {frac * 100:.0f}%  ·  "
                     f"{done / 1e9:.1f}/{total / 1e9:.1f} GB  ·  "
-                    f"{rate / 1e6:.0f} MB/s  ·  eta {_fmt_eta(eta)}")
+                    f"{rate / 1e6:.0f} MB/s  ·  eta {eta_s}")
         return f"preparing download… ({_fmt_eta(elapsed)})"
     return f"{_PHASE_LABEL.get(ph, ph)} … ({_fmt_eta(elapsed)})"
 

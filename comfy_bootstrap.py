@@ -348,7 +348,20 @@ def fetch_stack(key, unet=None):
     """downloads a named model set and symlinks it into comfyui's model dirs.
     unet= overrides just the unet gguf filename (e.g. a different quant)."""
     files = STACKS[key]
-    set_progress("download", total=_stack_total(files), watch=WORK_DIR)
+    total = _stack_total(files)
+    # kaggle scratch is ~60GB and ideogram4 alone is ~30GB. without this check a
+    # full disk just WEDGES the download -- hf_hub_download blocks, the bar sits
+    # at "100% eta 0s" (its rate is an average, so it still looks alive), and no
+    # error surfaces anywhere. fail fast and say what to delete instead.
+    free = shutil.disk_usage(WORK_DIR).free if os.path.isdir(WORK_DIR) else 0
+    if total and free and total > free:
+        raise RuntimeError(
+            f"not enough scratch disk for {key}: needs ~{total / 1e9:.0f}GB, only "
+            f"~{free / 1e9:.0f}GB free on {WORK_DIR} (kaggle gives ~60GB).\n"
+            f"free some up -- `du -sh {WORK_DIR}/* | sort -h | tail` shows the hogs, "
+            f"and stacks you're done with are safe to `rm -rf` (they re-download on "
+            f"demand) -- or restart the session for a clean disk, then retry.")
+    set_progress("download", total=total, watch=WORK_DIR)
     if key.startswith("lingbot"):
         # every lingbot variant loads through the rebels node pack
         node_dir = f"{COMFY_DIR}/custom_nodes/ComfyUI_Rebels_LingBot"
