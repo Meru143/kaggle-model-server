@@ -45,7 +45,13 @@ IMAGE_MODELS = {
         "hf_repo": "Tongyi-MAI/Z-Image-Turbo",
         "pip": ["diffusers>=0.39", "transformers", "accelerate", "bitsandbytes"],
         "quantize": None,
-        "defaults": {"num_inference_steps": 9, "guidance_scale": 0.0},
+        # 768 like every other entry -- this was the ONE model with no size cap,
+        # so it fell through to the pipeline's 1024. with the 12.3GB transformer
+        # resident there's only ~2GB of headroom, and bf16 attention on sm75 has
+        # no memory-efficient kernel (math backend materializes the full
+        # attention matrix), so 1024 asks for ~1.9GB in one go and ooms.
+        "defaults": {"num_inference_steps": 9, "guidance_scale": 0.0,
+                     "height": 768, "width": 768},
     },
     # krea 2 turbo: 8 steps, guidance 0.0 (card). encoder nf4'd too so the
     # whole resident set (~10GB) fits one t4 -- see load() for why quantized
@@ -376,8 +382,20 @@ def generate(pipe, prompt, **overrides):
     except Exception:
         import contextlib
         ctx = contextlib.nullcontext()
-    with ctx:
-        image = pipe(prompt, **params).images[0]
+    try:
+        with ctx:
+            image = pipe(prompt, **params).images[0]
+    except Exception as e:
+        if "out of memory" not in str(e).lower():
+            raise
+        wh = f"{params.get('width', 'default')}x{params.get('height', 'default')}"
+        raise RuntimeError(
+            f"out of vram at {wh}. attention memory grows with the SQUARE of the "
+            f"pixel count, so dropping the size helps far more than it looks: 768 "
+            f"is ~a third of 1024's attention, 512 is ~a sixteenth. set width/height "
+            f"in the studio (try 512), or KM_IMAGE_DTYPE=fp16 to halve attention "
+            f"memory again -- at the cost of fp16's black-frame risk on this model."
+        ) from e
     path = os.path.join(OUT_DIR, f"{int(time.time())}.png")
     image.save(path)
     import numpy as np
