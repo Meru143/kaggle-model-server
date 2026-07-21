@@ -749,6 +749,23 @@ def _vae_node(vae, device=None):
     return {"class_type": "VAELoader", "inputs": {"vae_name": vae}}
 
 
+def _ideogram_prompt(prompt):
+    """ideogram4 is trained on STRUCTURED json prompts -- comfy's own official
+    template feeds CLIPTextEncode a json blob, and ships a whole subgraph just to
+    build one. a bare sentence is out-of-distribution, so the model fills the gap
+    with what it knows best: magazine-cover typography, rendered as gibberish
+    when a few-step lora is also in play. wrap plain text; pass real json through.
+    (same rule as sdcpp._as_prompt -- kept local so the modules stay independent.)"""
+    s = (prompt or "").strip()
+    if s.startswith("{"):
+        try:
+            json.loads(s)
+            return s
+        except ValueError:
+            pass
+    return json.dumps({"high_level_description": s})
+
+
 def _round16(px, default):
     px = int(px) if px else default
     return max(256, (px // 16) * 16)  # 16-multiple keeps every latent packer happy
@@ -837,7 +854,8 @@ def _build_graph(stack, prompt, width=None, height=None, steps=None, seed=None):
         g = {"1": _loader_node(r["unet"], main_dev),
              "2": _clip_node(r["clip"], enc_dev),
              "3": _vae_node(r["vae"], main_dev),
-             "5": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["2", 0]}},
+             "5": {"class_type": "CLIPTextEncode",
+                   "inputs": {"text": _ideogram_prompt(prompt), "clip": ["2", 0]}},
              "6": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["5", 0]}},
              "7": {"class_type": "CFGGuider",  # replaced below when uncond is used
                    "inputs": {"cfg": r["cfg"], "model": ["1", 0],
