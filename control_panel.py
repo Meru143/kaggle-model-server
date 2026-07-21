@@ -961,9 +961,33 @@ def _build():
     return demo
 
 
-def launch_panel(auth=None):
+def _hold_cell():
+    """keep the notebook CELL running so kaggle doesn't reap the session.
+
+    kaggle stops an interactive session after ~20 min of "idle", where idle
+    means no cell is executing. gradio's launch() returns immediately inside a
+    notebook (the server moves to a background thread), so the cell completes,
+    the idle timer starts, and the session dies mid-generation -- taking
+    /kaggle/tmp with it, i.e. the sd.cpp build and every downloaded weight.
+    blocking here keeps a cell 'running' for as long as the studio is up.
+    the heartbeat is also the only liveness signal you get in the notebook."""
+    print("holding this cell so kaggle doesn't idle-stop the session "
+          "(interrupt the cell to release it; the studio keeps running).",
+          flush=True)
+    try:
+        while True:
+            time.sleep(300)
+            busy = ("launching " + str(_state["model"])) if _state["busy"] else (
+                "generating" if _img_state["gen_busy"] else "idle")
+            print(f"[{time.strftime('%H:%M:%S')}] studio alive — {busy}", flush=True)
+    except KeyboardInterrupt:
+        print("released; kaggle's idle timer is now running again.", flush=True)
+
+
+def launch_panel(auth=None, keep_alive=True):
     """builds and serves the studio; returns the gradio app. auth=("user","pass")
-    is strongly recommended -- the share url is public."""
+    is strongly recommended -- the share url is public. keep_alive=True blocks
+    the calling cell (see _hold_cell) -- pass False if you want the cell back."""
     import gradio as gr
     if auth is None:
         print("WARNING: no auth -- anyone with the share link controls your gpus. "
@@ -979,4 +1003,6 @@ def launch_panel(auth=None):
     if _launch_takes_style(gr):
         kwargs.update(_style(gr))
     demo.launch(**kwargs)
+    if keep_alive:
+        _hold_cell()   # blocks: kaggle reaps sessions with no cell running
     return demo
