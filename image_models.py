@@ -15,10 +15,10 @@ usage (from any notebook that clones the repo, or the studio's image tab):
 serving is out of scope for v1 -- these run as notebook cells. a fastapi
 wrapper can reuse harness.start_tunnel(port) later if an image api is wanted.
 
-t4 rules baked in everywhere: torch.float16 only (bf16 is unsupported on
-sm75 -- cards below all say bf16, adapted per the environment), sdpa/eager
-attention (no flash-attention on turing), nf4 quantization with
-bnb_4bit_compute_dtype=torch.float16.
+t4 rules baked in everywhere: sdpa/eager attention (no flash-attention on
+turing), nf4 quantization, fp32 vae decode. compute dtype is NOT hardcoded --
+best_dtype() probes the card (see its docstring): sm75 has no bf16 tensor
+cores, but bf16 arithmetic may still run, and it's what these models want.
 """
 
 import os
@@ -205,7 +205,8 @@ def load(key, gpu=None):
     except Exception:
         def set_progress(*a, **k):
             pass
-    kwargs = {"torch_dtype": torch.float16}  # cards say bf16; t4 is sm75 -> fp16
+    dtype = best_dtype()  # bf16 when the card can compute it, else fp16
+    kwargs = {"torch_dtype": dtype}
     if cfg.get("gated"):
         kwargs["token"] = os.environ.get("HF_TOKEN")
     if cfg.get("quantize"):
@@ -213,7 +214,7 @@ def load(key, gpu=None):
         kwargs["quantization_config"] = PipelineQuantizationConfig(
             quant_backend="bitsandbytes_4bit",
             quant_kwargs={"load_in_4bit": True,
-                          "bnb_4bit_compute_dtype": torch.float16},
+                          "bnb_4bit_compute_dtype": dtype},
             components_to_quantize=cfg["quantize"],
         )
     if cfg.get("transformer_from"):
@@ -223,9 +224,9 @@ def load(key, gpu=None):
         from diffusers import AutoModel, BitsAndBytesConfig
         kwargs["transformer"] = AutoModel.from_pretrained(
             cfg["transformer_from"], subfolder="transformer",
-            torch_dtype=torch.float16,
+            torch_dtype=dtype,
             quantization_config=BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16),
+                load_in_4bit=True, bnb_4bit_compute_dtype=dtype),
             token=os.environ.get("HF_TOKEN"))
         # skip the base's 5GB unconditional transformer; a zero stand-in is
         # registered AFTER load (from_pretrained type-checks component kwargs
@@ -257,7 +258,7 @@ def load(key, gpu=None):
             def __init__(self):
                 super().__init__()
                 self.register_buffer("_dtype_anchor",
-                                     torch.empty(0, dtype=torch.float16),
+                                     torch.empty(0, dtype=dtype),
                                      persistent=False)
 
             @property
@@ -292,6 +293,67 @@ def load(key, gpu=None):
     return pipe
 
 
+_DTYPE = None
+
+
+def best_dtype():
+    """the widest dtype this gpu can ACTUALLY compute in, bf16 preferred.
+
+    every model here is trained in bf16, whose ~3e38 range keeps activations
+    finite. fp16 tops out at 65504, so on a card without bf16 the hot layers
+    (attention scores, residual accumulations) overflow to inf, one inf*0 or
+    inf-inf becomes NaN, NaN spreads through everything it touches, and the vae
+    decodes an all-black frame. that IS the z-image/krea failure -- arithmetic
+    falling off a cliff, not a bad prompt.
+
+    torch.cuda.is_bf16_supported() is the wrong test: pre-ampere it falls
+    through to `including_emulation` and only checks that a bf16 TENSOR can be
+    allocated, which always succeeds (see torch/cuda/__init__.py). so probe a
+    real matmul -- sm75 has no bf16 tensor cores, but if torch still executes
+    the op (upcasting internally) we get the range we need. if cublas has no
+    sm75 bf16 gemm it raises here and we stay on fp16, exactly as before.
+
+    override with KM_IMAGE_DTYPE=fp16|bf16 if the probe guesses wrong.
+    """
+    global _DTYPE
+    if _DTYPE is not None:
+        return _DTYPE
+    import torch  # lazy like the rest of this module: torch exists only post-install()
+    forced = os.environ.get("KM_IMAGE_DTYPE", "").strip().lower()
+    if forced in ("fp16", "float16"):
+        _DTYPE = torch.float16
+    elif forced in ("bf16", "bfloat16"):
+        _DTYPE = torch.bfloat16
+    elif not torch.cuda.is_available():
+        _DTYPE = torch.float16
+    else:
+        _DTYPE = torch.float16
+        try:
+            a = torch.randn(512, 512, device="cuda", dtype=torch.bfloat16)
+            torch.cuda.synchronize()
+            t0 = time.time()
+            for _ in range(8):
+                out = a @ a
+            torch.cuda.synchronize()
+            bf_t = time.time() - t0
+            if not torch.isfinite(out).all().item():
+                raise RuntimeError("bf16 matmul returned non-finite values")
+            h = a.half()
+            torch.cuda.synchronize()
+            t0 = time.time()
+            for _ in range(8):
+                _ = h @ h
+            torch.cuda.synchronize()
+            fp_t = max(time.time() - t0, 1e-6)
+            _DTYPE = torch.bfloat16
+            print(f"bf16 compute works on this gpu ({bf_t / fp_t:.1f}x fp16's time) -- "
+                  f"using it; fp16 overflows these bf16-trained models to black frames")
+        except Exception as e:
+            print(f"bf16 compute unavailable ({type(e).__name__}: {e}) -- staying on fp16")
+    print(f"image compute dtype: {_DTYPE}")
+    return _DTYPE
+
+
 # set by generate() when the output is unusable; the studio reads it so a
 # black frame doesn't get reported as a cheerful "saved ok" with no explanation
 LAST_WARNING = None
@@ -321,10 +383,15 @@ def generate(pipe, prompt, **overrides):
     import numpy as np
     if np.asarray(image).max() <= 2:  # all-black frame = fp16 overflow (NaN latents)
         LAST_WARNING = (
-            "all-black frame: the latents overflowed fp16 (a t4 has no bf16, and "
-            "these pipelines assume it). this is the diffusers path failing, not "
-            "your prompt -- switch to the same model's '· comfy ✓ reliable' entry "
-            "in the dropdown, which renders it correctly.")
+            f"all-black frame (compute dtype was {_DTYPE}). " + (
+                "fp16 tops out at 65504 and these bf16-trained models overflow it "
+                "-> inf -> NaN -> black; this gpu refused bf16, so the diffusers "
+                "path has no fix here"
+                if "bfloat16" not in str(_DTYPE) else
+                "bf16 was active, so plain fp16 overflow is NOT the cause -- suspect "
+                "the nf4 quantization or a component still pinned to fp16")
+            + ". not your prompt. the same model's '· comfy ✓ reliable' entry "
+              "renders it correctly.")
         print("WARNING: " + LAST_WARNING)
     print(f"{path}  ({time.time() - t0:.1f}s, {params or 'pipeline defaults'})")
     return path
