@@ -167,20 +167,12 @@ STACKS = {
         ("Comfy-Org/Ideogram-4", "text_encoders/qwen3vl_8b_fp8_scaled.safetensors", "text_encoders"),
         ("Comfy-Org/Ideogram-4", "vae/flux2-vae.safetensors", "vae"),
     ],
-    # ideogram 4 GGUF: the small-footprint build. everything quantized -- Q4_K
-    # denoiser (5.8GB vs the fp8 repack's ~10GB) AND a gguf text encoder (5.0GB
-    # vs 9.4GB), so the whole stack is ~11.5GB instead of ~29.5GB. that is what
-    # makes it survive the 60GB scratch disk next to other stacks. carries the
-    # turbotime lora too, so it's single-transformer/few-step like -turbo.
-    # pick a different quant in the studio's quant box (list_stack_quants).
-    # NOTE: this repo also ships explicit nsfw loras -- deliberately NOT fetched;
-    # nsfw generation violates kaggle tos and risks the account.
-    "ideogram4-gguf": [
-        ("rectangleworm/ideogram-4-gguf", "diffusion/cond/ideogram4-Q4_K.gguf", "unet"),
-        ("ostris/ideogram_4_turbotime_lora", "ideogram_4_turbotime_v1.safetensors", "loras"),
-        ("rectangleworm/ideogram-4-gguf", "text_encoder/Qwen3-VL-8B-Q4_K_M.gguf", "text_encoders"),
-        ("rectangleworm/ideogram-4-gguf", "vae/flux2-vae.safetensors", "vae"),
-    ],
+    # NO ideogram4 gguf stack on purpose. ComfyUI-GGUF only loads the archs in
+    # its IMG_ARCH_LIST {flux, sd1, sdxl, sd3, aura, hidream, cosmos, ltxv,
+    # hyvid, wan, lumina2, qwen_image} -- ideogram4 isn't one, and those quants
+    # carry no arch metadata either, so its tensor-name fallback also fails
+    # ("Unknown model architecture!"). the fp8 ideogram4/-turbo stacks avoid this
+    # entirely by going through comfy's CORE UNETLoader instead of the gguf one.
     # krea 2 turbo HD finetune (image): ships its own hd-tuned vae; same
     # qwen3-vl encoder. Q6_K (10.9GB) is the quality pick if vram allows.
     "krea2-hd": [
@@ -203,7 +195,7 @@ STACKS = {
 # picker isn't polluted with image models.
 IMAGE_STACKS = frozenset({
     "z-image", "krea2-turbo", "krea2-raw", "krea2-hd",
-    "flux1", "flux2-klein-v3", "ideogram4", "ideogram4-turbo", "ideogram4-gguf",
+    "flux1", "flux2-klein-v3", "ideogram4", "ideogram4-turbo",
 })
 assert IMAGE_STACKS <= STACKS.keys(), \
     f"IMAGE_STACKS names not in STACKS: {IMAGE_STACKS - STACKS.keys()}"
@@ -343,6 +335,14 @@ def stack_repo(key):
     lora = next((r for r, _, sub in files if sub == "loras" and r != primary), None)
     return f"{primary}  +  {lora.split('/')[-1]}" if lora else f"{primary}  ({key})"
 
+
+# ComfyUI-GGUF's IMG_ARCH_LIST (loader.py). a gguf whose general.architecture
+# isn't one of these is rejected outright -- worth knowing BEFORE adding a stack,
+# because the files existing on hf says nothing about comfy being able to load them.
+_GGUF_IMG_ARCHS = frozenset({
+    "flux", "sd1", "sdxl", "sd3", "aura", "hidream",
+    "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image",
+})
 
 _LINGBOT_NODE_REPO = "https://github.com/RealRebelAI/ComfyUI_Rebels_LingBot"
 
@@ -603,7 +603,16 @@ def queue_workflow(workflow, timeout=3600):
         if entry:
             status = entry.get("status", {})
             if status.get("status_str") == "error":
-                raise RuntimeError(f"workflow failed. tail of {COMFY_LOG}:\n{_tail(COMFY_LOG)}")
+                tail = _tail(COMFY_LOG)
+                hint = ""
+                if "not currently supported" in tail or "architecture" in tail.lower():
+                    hint = (
+                        "\n\nthis is ComfyUI-GGUF refusing the gguf: it only loads the archs in "
+                        f"its IMG_ARCH_LIST {sorted(_GGUF_IMG_ARCHS)}. a model outside that list "
+                        "(ideogram4, flux2) can't be run from a gguf here no matter the quant -- "
+                        "use that model's fp8/safetensors stack instead, which loads through "
+                        "comfy's core UNETLoader and never touches ComfyUI-GGUF.")
+                raise RuntimeError(f"workflow failed. tail of {COMFY_LOG}:\n{tail}{hint}")
             if status.get("completed"):
                 paths = []
                 for node_out in entry.get("outputs", {}).values():
@@ -661,11 +670,6 @@ _IMAGE_RECIPE = {
                     unet_uncond="ideogram4_unconditional_fp8_scaled.safetensors",
                     clip=("qwen3vl_8b_fp8_scaled.safetensors", "ideogram4"),
                     vae="flux2-vae.safetensors", steps=25, cfg=7.0, mu=0.5, std=1.75),
-    # all-gguf small build: same turbo graph, quantized denoiser + text encoder
-    "ideogram4-gguf": dict(family="ideogram4", unet=("gguf", "ideogram4-Q4_K.gguf"),
-                    lora="ideogram_4_turbotime_v1.safetensors",
-                    clip=("Qwen3-VL-8B-Q4_K_M.gguf", "ideogram4"),
-                    vae="flux2-vae.safetensors", steps=8, cfg=1.0, mu=0.5, std=1.75),
     # no unet_uncond + a lora => the single-transformer, cfg-free turbo path
     "ideogram4-turbo": dict(family="ideogram4", unet=("safetensors", "ideogram4_fp8_scaled.safetensors"),
                     lora="ideogram_4_turbotime_v1.safetensors",
