@@ -226,6 +226,24 @@ MODELS = {
         "est_vram_gb": 9,
     },
 
+    # 3B agentic model (Q4_K_M ~2.5GB, huge headroom on single T4).
+    # default sampling: temp 0.0 for structured JSON extraction tasks
+    # (topic inference, deep research analysis). raise temp per-call if
+    # used for creative/generative work. --jinja not shipped in this gguf,
+    # so omit it and let the chat template fall back.
+    "owao/Nanbeige4.2-3B-GGUF": {
+        "hf_repo": "owao/Nanbeige4.2-3B-GGUF",
+        "hf_file": "Nanbeige4.2-3B-Q4_K_M.gguf",
+        "ctx": 4096,
+        "ngl": 99,
+        "tensor_split": None,
+        "n_cpu_moe": None,
+        "gpu_devices": [0],
+        "extra_args": [],
+        "sampling": {"temperature": 0.0, "top_p": 0.95, "top_k": 1},
+        "est_vram_gb": 3,
+    },
+
     # ---- dual-t4 tier (file <= ~26GB, tensor_split both gpus) -----------
 
     # reasoning finetune of qwen3.6-27b that answers in ~half the tokens.
