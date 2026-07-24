@@ -228,12 +228,13 @@ MODELS = {
 
     # 3B agentic model (Q4_K_M ~2.5GB, huge headroom on single T4).
     # default sampling: temp 0.0 for structured JSON extraction tasks
-    # (topic inference, deep research analysis). raise temp per-call if
-    # used for creative/generative work. --jinja not shipped in this gguf,
-    # so omit it and let the chat template fall back.
-    "owao/Nanbeige4.2-3B-GGUF": {
-        "hf_repo": "owao/Nanbeige4.2-3B-GGUF",
-        "hf_file": "Nanbeige4.2-3B-Q4_K_M.gguf",
+    # default sampling: temp 0.0 for structured JSON extraction tasks
+        # (topic inference, deep research analysis). raise temp per-call
+        # when you need a bit of creativity instead.
+        "owao/Nanbeige4.2-3B-GGUF": {
+            "hf_repo": "owao/Nanbeige4.2-3B-GGUF",
+            "hf_file": "nanbeige4.2-3b-Q4_K_M.gguf",
+            "llama_cpp_repo": "https://github.com/Nanbeige/llama.cpp",
         "ctx": 4096,
         "ngl": 99,
         "tensor_split": None,
